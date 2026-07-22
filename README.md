@@ -135,3 +135,7 @@ python -m unittest discover -s assetforge/tests -v
 ```
 
 The current suite covers animation selection, placement preservation, alpha-hole repair, identity and anchor overrides, isolated exports, explicit deployment, web registry output, and Godot `SpriteFrames` output.
+
+## License
+
+AssetForge is released under the [MIT License](LICENSE).

@@ -8,6 +8,8 @@ version = "0.2.0"
 description = "Deterministic normalization, validation, and engine export for generated 2D game assets."
 readme = "README.md"
 requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = [
   "jsonschema>=4.21",
   "numpy>=1.24",
