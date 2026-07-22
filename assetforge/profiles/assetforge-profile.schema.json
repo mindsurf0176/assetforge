@@ -100,6 +100,7 @@
         "preservePlacement": {"type": "boolean"},
         "canvas": {"$ref": "#/$defs/positiveSize"},
         "anchor": {"$ref": "#/$defs/coordinate"},
+        "contentMin": {"$ref": "#/$defs/positiveSize"},
         "contentMax": {"$ref": "#/$defs/positiveSize"},
         "padding": {"type": "integer", "minimum": 0},
         "filtering": {"enum": ["nearest", "lanczos", "box"]},
@@ -172,6 +173,13 @@
           }
         },
         "alphaThreshold": {"type": "integer", "minimum": 0, "maximum": 255},
+        "partAlpha": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "maxEnclosedTransparentPixels": {"type": "integer", "minimum": 0}
+          }
+        },
         "palette": {
           "type": "object",
           "additionalProperties": false,

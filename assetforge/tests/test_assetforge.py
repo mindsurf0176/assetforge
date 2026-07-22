@@ -95,7 +95,7 @@ class ProfileTests(unittest.TestCase):
             "east",
             reference="/tmp/master.png",
         )
-        self.assertEqual(plan["contract"]["minFrames"], 2)
+        self.assertEqual(plan["contract"]["minFrames"], 3)
         self.assertEqual(plan["contract"]["canvasPolicy"], "fixed")
         self.assertIn("human contact-sheet approval", plan["gates"][-1])
 

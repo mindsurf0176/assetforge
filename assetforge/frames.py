@@ -11,6 +11,7 @@ from typing import Any, Iterable
 import numpy as np
 from PIL import Image, ImageDraw
 
+from .path_safety import safe_output_child
 from .profile import Profile
 
 
@@ -98,10 +99,21 @@ def alpha_bbox(image: Image.Image, min_alpha: int) -> tuple[int, int, int, int] 
 
 def remove_corner_background(image: Image.Image, tolerance: int) -> Image.Image:
     rgba = np.asarray(image.convert("RGBA")).copy()
+    height, width = rgba.shape[:2]
+    if height < 1 or width < 1:
+        raise ValueError("image must have a positive width and height")
     if (rgba[:, :, 3] < 250).any():
         return Image.fromarray(rgba)
+    near_y, near_x = min(1, height - 1), min(1, width - 1)
+    far_y, far_x = max(0, height - 2), max(0, width - 2)
     corners = np.array(
-        [rgba[1, 1, :3], rgba[1, -2, :3], rgba[-2, 1, :3], rgba[-2, -2, :3]], dtype=np.int16
+        [
+            rgba[near_y, near_x, :3],
+            rgba[near_y, far_x, :3],
+            rgba[far_y, near_x, :3],
+            rgba[far_y, far_x, :3],
+        ],
+        dtype=np.int16,
     )
     background = np.median(corners, axis=0)
     distance = np.abs(rgba[:, :, :3].astype(np.int16) - background).sum(axis=2)
@@ -371,10 +383,20 @@ def ingest_frames(
     tier_name: str,
     animation: str,
     direction: str,
+    *,
+    placement_mode: str = "per-frame-anchor",
+    palette_override: Image.Image | None = None,
+    source_anchor: tuple[int, int] | list[int] | None = None,
+    source_bounds: tuple[int, int, int, int] | list[int] | None = None,
 ) -> dict[str, Any]:
     tier = profile.tier(tier_name)
     policy = tier.get("canvasPolicy", "fixed")
     preserve_placement = bool(tier.get("preservePlacement", False))
+    if placement_mode not in {"per-frame-anchor", "shared-motion"}:
+        raise ValueError(
+            "placement_mode must be 'per-frame-anchor' or 'shared-motion'"
+        )
+    preserve_motion = placement_mode == "shared-motion"
     if preserve_placement and policy != "fixed":
         raise ValueError(
             f"tier {tier_name!r}: preservePlacement requires canvasPolicy='fixed'"
@@ -384,6 +406,10 @@ def ingest_frames(
     background_quality = quality.get("background", {})
     tolerance = int(background_quality.get("tolerance", 42))
     max_repair_pixels = int(background_quality.get("maxRepairableEnclosedComponentPixels", 0))
+    if preserve_motion:
+        # Spaces enclosed by articulated limbs, wings, or tails are legitimate
+        # cutout geometry, not generator pinholes.
+        max_repair_pixels = 0
     padding = int(tier.get("padding", 2))
     filtering = tier.get("filtering", "nearest")
     downscale_filtering = tier.get("downscaleFiltering", "lanczos")
@@ -409,11 +435,20 @@ def ingest_frames(
                     f"{list(expected_canvas)} when preservePlacement=true"
                 )
             prepared.append(image)
+        elif preserve_motion:
+            prepared.append(image)
         else:
             prepared.append(image.crop(box))
 
+    if preserve_motion:
+        source_sizes = {image.size for image in prepared}
+        if len(source_sizes) != 1:
+            raise ValueError(
+                "shared-motion placement requires every source frame to use one canvas"
+            )
+
     content_max = tier.get("contentMax")
-    if content_max and not preserve_placement:
+    if content_max and not preserve_placement and not preserve_motion:
         prepared = [
             _resize_to_fit(
                 image,
@@ -434,17 +469,79 @@ def ingest_frames(
     anchor_x, anchor_y = map(int, anchor)
     max_size = (max(1, canvas_w - padding * 2), max(1, anchor_y - padding + 1))
 
-    fitted = (
-        prepared
-        if preserve_placement
-        else [
-            _resize_to_fit(image, max_size, filtering, allow_upscale, downscale_filtering)
-            for image in prepared
-        ]
-    )
+    shared_offset: tuple[int, int] | None = None
+    fitted_source_anchor: tuple[int, int] | None = None
+    if preserve_motion and source_anchor is not None:
+        source_anchor_x, source_anchor_y = map(int, source_anchor)
+        source_width, source_height = prepared[0].size
+        if not (0 <= source_anchor_x < source_width and 0 <= source_anchor_y < source_height):
+            raise ValueError(
+                f"source anchor {list(source_anchor)} lies outside source canvas "
+                f"{[source_width, source_height]}"
+            )
+        if source_bounds is None:
+            bounds_left, bounds_top, bounds_right, bounds_bottom = 0, 0, source_width, source_height
+        else:
+            if len(source_bounds) != 4:
+                raise ValueError("source_bounds must be [left, top, right, bottom]")
+            bounds_left, bounds_top, bounds_right, bounds_bottom = map(int, source_bounds)
+            if not (
+                0 <= bounds_left < bounds_right <= source_width
+                and 0 <= bounds_top < bounds_bottom <= source_height
+            ):
+                raise ValueError(
+                    f"source bounds {list(source_bounds)} lie outside source canvas "
+                    f"{[source_width, source_height]}"
+                )
+        capacities = []
+        extents = (
+            (source_anchor_x - bounds_left, anchor_x - padding),
+            (bounds_right - 1 - source_anchor_x, canvas_w - padding - 1 - anchor_x),
+            (source_anchor_y - bounds_top, anchor_y - padding),
+            # A profile foot anchor is intentionally close to the bottom edge.
+            # Bottom-side motion may use the remaining pixels below it; applying
+            # top padding here can collapse an otherwise valid motion envelope.
+            (bounds_bottom - 1 - source_anchor_y, canvas_h - 1 - anchor_y),
+        )
+        for extent, capacity in extents:
+            if extent > 0:
+                capacities.append(max(0.0, capacity) / extent)
+        scale = min(capacities or [1.0])
+        if not allow_upscale:
+            scale = min(scale, 1.0)
+        content_width = bounds_right - bounds_left
+        content_height = bounds_bottom - bounds_top
+        if scale <= 0 or min(content_width * scale, content_height * scale) < 4:
+            raise ValueError(
+                "shared motion envelope cannot fit the profile canvas without "
+                "collapsing below 4 pixels"
+            )
+        target_size = (
+            max(1, round(source_width * scale)),
+            max(1, round(source_height * scale)),
+        )
+        sampling = _resampling(downscale_filtering if scale < 1 else filtering)
+        fitted = [image.resize(target_size, sampling) for image in prepared]
+        fitted_source_anchor = (
+            round(source_anchor_x * scale),
+            round(source_anchor_y * scale),
+        )
+        shared_offset = (
+            anchor_x - fitted_source_anchor[0],
+            anchor_y - fitted_source_anchor[1],
+        )
+    else:
+        fitted = (
+            prepared
+            if preserve_placement
+            else [
+                _resize_to_fit(image, max_size, filtering, allow_upscale, downscale_filtering)
+                for image in prepared
+            ]
+        )
     palette_cfg = quality.get("palette", {})
-    palette = None
-    if palette_cfg.get("lockAcrossClip", True):
+    palette = palette_override
+    if palette is None and palette_cfg.get("lockAcrossClip", True):
         palette = build_shared_palette(fitted, int(palette_cfg.get("maxColors", 32)), min_alpha)
 
     output = Path(output_dir).expanduser().resolve()
@@ -457,20 +554,36 @@ def ingest_frames(
     paths: list[Path] = []
     metrics: list[FrameMetric] = []
     for index, image in enumerate(fitted):
+        image = repair_small_enclosed_transparent_components(
+            image,
+            max_repair_pixels,
+            min_alpha,
+        )
         image = apply_palette(image, palette)
         if preserve_placement:
             canvas = image
         else:
             canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
-            x = anchor_x - image.width // 2
-            y = anchor_y - image.height + 1
+            if shared_offset is not None:
+                x, y = shared_offset
+            else:
+                x = anchor_x - image.width // 2
+                y = anchor_y - image.height + 1
             canvas.alpha_composite(image, (x, y))
-        path = output / f"{animation}_{index:0{digits}d}.png"
+        path = safe_output_child(
+            output,
+            f"{animation}_{index:0{digits}d}.png",
+            label="normalized frame",
+        )
         canvas.save(path)
         paths.append(path)
         metrics.append(_metric(path, canvas, min_alpha))
 
-    contact = make_contact_sheet(paths, output / "_contact.png", scale=int(tier.get("previewScale", 4)))
+    contact = make_contact_sheet(
+        paths,
+        safe_output_child(output, "_contact.png", label="normalized contact sheet"),
+        scale=int(tier.get("previewScale", 4)),
+    )
     manifest = {
         "schemaVersion": 1,
         "profile": profile.id,
@@ -481,6 +594,10 @@ def ingest_frames(
         "direction": direction,
         "canvasPolicy": policy,
         "preservePlacement": preserve_placement,
+        "placementMode": placement_mode,
+        "sourceAnchor": list(source_anchor) if source_anchor is not None else None,
+        "sourceBounds": list(source_bounds) if source_bounds is not None else None,
+        "fittedSourceAnchor": list(fitted_source_anchor) if fitted_source_anchor is not None else None,
         "canvas": [canvas_w, canvas_h],
         "anchor": [anchor_x, anchor_y],
         "source": str(Path(input_dir).expanduser().resolve()),
@@ -488,5 +605,8 @@ def ingest_frames(
         "frames": [asdict(metric) for metric in metrics],
         "contactSheet": str(contact),
     }
-    (output / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    safe_output_child(output, "manifest.json", label="normalized manifest").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
     return manifest

@@ -46,4 +46,6 @@ jobs:
           "from importlib.resources import files;
           root = files('assetforge');
           assert (root / 'profiles' / 'assetforge-profile.schema.json').is_file();
+          assert (root / 'schemas' / 'rig-spec.schema.json').is_file();
+          assert (root / 'schemas' / 'animation-spec.schema.json').is_file();
           assert (root / 'workflows' / 'sdxl-pixel-art-reference-api.json').is_file()"

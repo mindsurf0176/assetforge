@@ -1,0 +1,294 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:assetforge:rig-spec:schema:1",
+  "title": "AssetForge RigSpec",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "id",
+    "direction",
+    "archetype",
+    "canvas",
+    "source",
+    "parts",
+    "skeleton",
+    "clips"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "minLength": 1
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "direction": {
+      "$ref": "#/$defs/identifier"
+    },
+    "archetype": {
+      "enum": [
+        "biped-side",
+        "quadruped-side",
+        "winged-quadruped-side"
+      ]
+    },
+    "canvas": {
+      "$ref": "#/$defs/positiveSize"
+    },
+    "source": {
+      "$ref": "#/$defs/source"
+    },
+    "parts": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "$ref": "#/$defs/identifier"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/part"
+      }
+    },
+    "skeleton": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "$ref": "#/$defs/identifier"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/joint"
+      }
+    },
+    "clips": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "$ref": "#/$defs/identifier"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/clip"
+      }
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "number": {
+      "type": "number"
+    },
+    "coordinate": {
+      "type": "array",
+      "prefixItems": [
+        {
+          "$ref": "#/$defs/number"
+        },
+        {
+          "$ref": "#/$defs/number"
+        }
+      ],
+      "items": false,
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "positiveSize": {
+      "type": "array",
+      "prefixItems": [
+        {
+          "type": "integer",
+          "minimum": 1
+        },
+        {
+          "type": "integer",
+          "minimum": 1
+        }
+      ],
+      "items": false,
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "quality",
+        "occlusionSynthesis"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "artist-parts",
+            "part-sheet",
+            "auto-segmented-flat"
+          ]
+        },
+        "quality": {
+          "enum": [
+            "production",
+            "coarse"
+          ]
+        },
+        "occlusionSynthesis": {
+          "type": "boolean"
+        },
+        "reference": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"mode": {"const": "auto-segmented-flat"}},
+            "required": ["mode"]
+          },
+          "then": {
+            "properties": {
+              "quality": {"const": "coarse"},
+              "occlusionSynthesis": {"const": false}
+            }
+          },
+          "else": {
+            "properties": {
+              "quality": {"const": "production"},
+              "occlusionSynthesis": {"const": false}
+            }
+          }
+        }
+      ]
+    },
+    "part": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "image",
+        "pivot",
+        "joint",
+        "z"
+      ],
+      "properties": {
+        "image": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pivot": {
+          "$ref": "#/$defs/coordinate"
+        },
+        "joint": {
+          "$ref": "#/$defs/identifier"
+        },
+        "z": {
+          "type": "integer"
+        }
+      }
+    },
+    "joint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "parent",
+        "offset"
+      ],
+      "properties": {
+        "parent": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "offset": {
+          "$ref": "#/$defs/coordinate"
+        }
+      }
+    },
+    "keyframe": {
+      "type": "array",
+      "prefixItems": [
+        {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        {
+          "type": "number"
+        }
+      ],
+      "items": false,
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "keyframes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/keyframe"
+      }
+    },
+    "channels": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "rotation": {
+          "$ref": "#/$defs/keyframes"
+        },
+        "offset_x": {
+          "$ref": "#/$defs/keyframes"
+        },
+        "offset_y": {
+          "$ref": "#/$defs/keyframes"
+        }
+      }
+    },
+    "tracks": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "$ref": "#/$defs/identifier"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/channels"
+      }
+    },
+    "clip": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fps",
+        "loop",
+        "tracks"
+      ],
+      "properties": {
+        "fps": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "loop": {
+          "type": "boolean"
+        },
+        "grounded": {
+          "type": "boolean"
+        },
+        "ease": {
+          "enum": [
+            "linear",
+            "smooth"
+          ]
+        },
+        "tracks": {
+          "$ref": "#/$defs/tracks"
+        }
+      }
+    }
+  }
+}

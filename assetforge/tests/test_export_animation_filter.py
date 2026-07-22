@@ -139,6 +139,29 @@ class AnimationFilteredExportTests(unittest.TestCase):
                     "res://frames",
                 )
 
+    def test_nested_work_directory_is_a_safe_isolated_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "source"
+            source.mkdir()
+            _mixed_frames(source)
+            output = root / "build" / "exports" / "walk.tres"
+
+            result = export_godot_spriteframes(
+                _profile(root, "godot"),
+                source,
+                output,
+                "walk",
+                "res://frames",
+            )
+
+            self.assertEqual(result["deploymentMode"], "artifact")
+            self.assertEqual(
+                Path(result["deployDir"]),
+                (root / "build" / "exports" / "frames").resolve(),
+            )
+            self.assertTrue((root / "build" / "exports" / "frames" / "walk_00.png").is_file())
+
     def test_explicit_web_deploy_resolves_prefix_from_project_root(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -168,6 +191,68 @@ class AnimationFilteredExportTests(unittest.TestCase):
             self.assertEqual(Path(result["deployDir"]), deploy_dir.resolve())
             self.assertTrue((deploy_dir / "walk_00.png").is_file())
             self.assertTrue((deploy_dir / "walk_01.png").is_file())
+
+    def test_redeploy_removes_only_stale_frames_for_that_animation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            project = root / "project"
+            source = root / "source"
+            artifact = root / "artifact"
+            destination = project / "assets" / "runtime" / "companion"
+            for directory in (project, source, artifact, destination):
+                directory.mkdir(parents=True, exist_ok=True)
+            _mixed_frames(source)
+            profile = _profile(project, "web")
+            arguments = (
+                profile,
+                source,
+                artifact / "companion-walk.json",
+                "companion",
+                "runtime",
+                "walk",
+                "south",
+                "./assets/runtime/companion",
+                destination,
+            )
+            export_web_registry(*arguments)
+            unrelated = destination / "attack_00.png"
+            Image.new("RGBA", (8, 8), (50, 60, 70, 255)).save(unrelated)
+            (source / "walk_01.png").unlink()
+
+            result = export_web_registry(*arguments)
+
+            self.assertEqual(result["verifiedReferences"], 1)
+            self.assertTrue((destination / "walk_00.png").is_file())
+            self.assertFalse((destination / "walk_01.png").exists())
+            self.assertTrue(unrelated.is_file())
+
+    def test_deploy_rejects_existing_frame_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            project = root / "project"
+            source = root / "source"
+            artifact = root / "artifact"
+            destination = project / "assets" / "runtime" / "companion"
+            for directory in (project, source, artifact, destination):
+                directory.mkdir(parents=True, exist_ok=True)
+            _mixed_frames(source)
+            victim = root / "victim.png"
+            victim.write_bytes(b"do-not-overwrite")
+            (destination / "walk_00.png").symlink_to(victim)
+
+            with self.assertRaisesRegex(ValueError, "symbolic link"):
+                export_web_registry(
+                    _profile(project, "web"),
+                    source,
+                    artifact / "walk.json",
+                    "companion",
+                    "runtime",
+                    "walk",
+                    "south",
+                    "./assets/runtime/companion",
+                    destination,
+                )
+            self.assertEqual(victim.read_bytes(), b"do-not-overwrite")
 
     def test_export_fails_when_requested_animation_has_no_frames(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
