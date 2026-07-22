@@ -1,0 +1,102 @@
+{
+  "$schema": "./assetforge-profile.schema.json",
+  "schemaVersion": 1,
+  "id": "web-pixel-demo",
+  "kind": "pixel-character",
+  "projectRoot": ".",
+  "directions": ["south", "east", "north", "west"],
+  "mirrorDirections": {},
+  "tiers": {
+    "village": {
+      "canvasPolicy": "fixed",
+      "canvas": [40, 40],
+      "anchor": [20, 37],
+      "padding": 2,
+      "filtering": "nearest",
+      "downscaleFiltering": "box",
+      "allowUpscale": false,
+      "previewScale": 6
+    }
+  },
+  "animations": {
+    "idle": {
+      "minFrames": 1,
+      "maxFrames": 8,
+      "fps": 5,
+      "loop": true,
+      "prompt": "soft breathing and one tiny ear or tail motion"
+    },
+    "walk": {
+      "minFrames": 4,
+      "maxFrames": 8,
+      "fps": 8,
+      "loop": true,
+      "prompt": "cute readable walk cycle with a stable face and palette"
+    },
+    "attack": {
+      "minFrames": 3,
+      "maxFrames": 8,
+      "fps": 10,
+      "loop": false,
+      "prompt": "anticipation, readable attack snap, and recovery"
+    },
+    "hit": {
+      "minFrames": 2,
+      "maxFrames": 5,
+      "fps": 10,
+      "loop": false,
+      "prompt": "short recoil while preserving the silhouette"
+    },
+    "victory": {
+      "minFrames": 3,
+      "maxFrames": 8,
+      "fps": 8,
+      "loop": false,
+      "prompt": "compact celebratory pose and recovery"
+    }
+  },
+  "generation": {
+    "canvas": [1024, 1024],
+    "pixelCanvas": [128, 128],
+    "referenceFill": 0.9,
+    "projection": "orthographic low three-quarter top-down",
+    "stylePrompt": "compact super-deformed mythical companion sprite, chunky pixel clusters, crisp square edges, readable face, short limbs, limited pastel palette, no anti-aliasing",
+    "backgroundPrompt": "isolated on one plain flat pale mint background with no scenery",
+    "referenceBackground": [236, 244, 241],
+    "characters": {
+      "companion": "tiny round mythical companion with small wings and a short fluffy tail"
+    },
+    "steps": 16,
+    "cfg": 5.5,
+    "denoise": 0.1,
+    "negativePrompt": "heavy black exterior ring, changed species, realistic anatomy, long limbs, extra limbs, text, UI, scenery, gradients, blur, anti-aliasing"
+  },
+  "quality": {
+    "background": {
+      "mode": "transparent-or-corner",
+      "tolerance": 42,
+      "maxRepairableEnclosedComponentPixels": 1,
+      "maxEnclosedTransparentPixels": 0
+    },
+    "alphaThreshold": 20,
+    "palette": {"maxColors": 24, "lockAcrossClip": true},
+    "anchor": {"type": "bottom-center", "maxFootDrift": 1},
+    "identity": {"maxHeightDriftRatio": 0.28, "maxWidthDriftRatio": 0.45}
+  },
+  "providers": {
+    "comfyLocal": {
+      "endpoint": "http://127.0.0.1:8188",
+      "installationPath": "~/ComfyUI-Local",
+      "workflowTemplate": "../workflows/sdxl-pixel-art-reference-api.json",
+      "checkpoint": "sd_xl_base_1.0.safetensors",
+      "lora": "pixel-art-xl.safetensors",
+      "loraStrengthModel": 1.0,
+      "loraStrengthClip": 1.0
+    }
+  },
+  "export": {
+    "engine": "web",
+    "format": "registry-json",
+    "resourcePrefix": "./assets/pixel/runtime/generated"
+  }
+}

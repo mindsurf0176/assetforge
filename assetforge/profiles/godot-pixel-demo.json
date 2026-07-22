@@ -1,0 +1,123 @@
+{
+  "$schema": "./assetforge-profile.schema.json",
+  "schemaVersion": 1,
+  "id": "godot-pixel-demo",
+  "kind": "pixel-character",
+  "projectRoot": ".",
+  "directions": ["east"],
+  "mirrorDirections": {"west": "east"},
+  "tiers": {
+    "battle-approved": {
+      "canvasPolicy": "fixed",
+      "canvas": [244, 247],
+      "anchor": [123, 243],
+      "preservePlacement": true,
+      "padding": 3,
+      "filtering": "nearest",
+      "downscaleFiltering": "lanczos",
+      "allowUpscale": false,
+      "previewScale": 4
+    },
+    "battle-generated": {
+      "canvasPolicy": "fixed",
+      "canvas": [244, 247],
+      "anchor": [123, 243],
+      "preservePlacement": false,
+      "padding": 12,
+      "filtering": "nearest",
+      "downscaleFiltering": "lanczos",
+      "allowUpscale": false,
+      "previewScale": 4
+    }
+  },
+  "animations": {
+    "idle": {
+      "minFrames": 1,
+      "maxFrames": 2,
+      "fps": 4,
+      "loop": true,
+      "prompt": "combat-ready idle with subtle breathing"
+    },
+    "walk": {
+      "minFrames": 4,
+      "maxFrames": 10,
+      "fps": 10,
+      "loop": true,
+      "anchor": {"maxFootDrift": 3},
+      "prompt": "low combat run toward the right with held props kept stable"
+    },
+    "aim": {
+      "minFrames": 1,
+      "maxFrames": 6,
+      "fps": 6,
+      "loop": true,
+      "prompt": "hold aim toward the right with minimal breathing sway"
+    },
+    "attack": {
+      "minFrames": 2,
+      "maxFrames": 8,
+      "fps": 12,
+      "loop": false,
+      "prompt": "anticipation, attack, recoil, and recovery"
+    },
+    "hit": {
+      "minFrames": 1,
+      "maxFrames": 5,
+      "fps": 10,
+      "loop": false,
+      "prompt": "brief hit flinch while held props remain rigid"
+    },
+    "death": {
+      "minFrames": 2,
+      "maxFrames": 8,
+      "fps": 8,
+      "loop": false,
+      "identity": {"maxHeightDriftRatio": 0.35},
+      "prompt": "stagger, fall, and final grounded pose"
+    }
+  },
+  "generation": {
+    "canvas": [1024, 1024],
+    "pixelCanvas": [128, 128],
+    "referenceFill": 0.94,
+    "projection": "flat orthographic side view facing right",
+    "stylePrompt": "compact super-deformed game sprite, chunky pixel clusters, crisp square edges, readable silhouette, limited harmonious palette, no anti-aliasing",
+    "backgroundPrompt": "isolated on one plain flat pale mint background with no scenery",
+    "referenceBackground": [236, 244, 241],
+    "characters": {
+      "guardian": "compact ice guardian with a short sword and one translucent crystal shield"
+    },
+    "steps": 16,
+    "cfg": 5.5,
+    "denoise": 0.1,
+    "negativePrompt": "front view, perspective, changed equipment, changed costume, realistic anatomy, extra limbs, scenery, gradients, blur, anti-aliasing, text, UI"
+  },
+  "quality": {
+    "background": {
+      "mode": "transparent-or-corner",
+      "tolerance": 42,
+      "maxRepairableEnclosedComponentPixels": 0,
+      "maxEnclosedTransparentPixels": 0
+    },
+    "alphaThreshold": 20,
+    "palette": {"maxColors": 256, "lockAcrossClip": true},
+    "anchor": {"type": "bottom-center", "maxFootDrift": 1},
+    "identity": {"maxHeightDriftRatio": 0.22, "maxWidthDriftRatio": 0.65}
+  },
+  "providers": {
+    "comfyLocal": {
+      "endpoint": "http://127.0.0.1:8188",
+      "installationPath": "~/ComfyUI-Local",
+      "workflowTemplate": "../workflows/sdxl-pixel-art-reference-api.json",
+      "checkpoint": "sd_xl_base_1.0.safetensors",
+      "lora": "pixel-art-xl.safetensors",
+      "loraStrengthModel": 1.0,
+      "loraStrengthClip": 1.0
+    }
+  },
+  "export": {
+    "engine": "godot",
+    "format": "spriteframes",
+    "resourcePrefix": "res://assets/sprites/generated"
+  }
+}
