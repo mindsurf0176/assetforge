@@ -104,7 +104,13 @@ def validate_frames(
     tier_name: str,
     animation: str | None = None,
     report_path: str | Path | None = None,
+    *,
+    placement_mode: str = "per-frame-anchor",
 ) -> dict[str, Any]:
+    if placement_mode not in {"per-frame-anchor", "shared-motion"}:
+        raise ValueError(
+            "placement_mode must be 'per-frame-anchor' or 'shared-motion'"
+        )
     tier = profile.tier(tier_name)
     quality = profile.data["quality"]
     animation_contract = profile.animation(animation) if animation else {}
@@ -145,6 +151,8 @@ def validate_frames(
                 }
             )
             if (
+                placement_mode != "shared-motion"
+                and
                 max_enclosed_transparent_pixels is not None
                 and hole_pixels > max_enclosed_transparent_pixels
             ):
@@ -163,18 +171,45 @@ def validate_frames(
             if metric.canvas != expected:
                 errors.append(f"{metric.file}: canvas {metric.canvas} != expected {expected}")
 
+    content_min = tier.get("contentMin")
+    if content_min:
+        minimum_width, minimum_height = map(int, content_min)
+        for metric in metrics:
+            width, height = metric.contentSize
+            if width < minimum_width or height < minimum_height:
+                errors.append(
+                    f"{metric.file}: content {metric.contentSize} is below "
+                    f"contentMin={[minimum_width, minimum_height]}"
+                )
+
     anchor_quality = dict(quality.get("anchor", {}))
     anchor_quality.update(animation_contract.get("anchor", {}))
     anchor_tolerance = int(anchor_quality.get("maxFootDrift", 1))
     anchor = tier.get("anchor")
     if anchor:
         expected_y = int(anchor[1])
-        for metric in metrics:
-            if abs(metric.foot[1] - expected_y) > anchor_tolerance:
+        if placement_mode == "shared-motion":
+            # The first authored pose must start on the profile ground line.
+            # Later non-loop frames may intentionally lunge, recoil, or fall.
+            if metrics and abs(metrics[0].foot[1] - expected_y) > anchor_tolerance:
                 errors.append(
-                    f"{metric.file}: foot y={metric.foot[1]} exceeds anchor y={expected_y} "
-                    f"tolerance={anchor_tolerance}"
+                    f"{metrics[0].file}: initial foot y={metrics[0].foot[1]} exceeds "
+                    f"anchor y={expected_y} tolerance={anchor_tolerance} in shared-motion mode"
                 )
+            if bool(animation_contract.get("loop", True)) and metrics:
+                feet = [metric.foot[1] for metric in metrics]
+                if max(feet) - min(feet) > anchor_tolerance:
+                    errors.append(
+                        f"foot-line drift {max(feet) - min(feet)}px exceeds "
+                        f"tolerance={anchor_tolerance}px in shared-motion mode"
+                    )
+        else:
+            for metric in metrics:
+                if abs(metric.foot[1] - expected_y) > anchor_tolerance:
+                    errors.append(
+                        f"{metric.file}: foot y={metric.foot[1]} exceeds anchor y={expected_y} "
+                        f"tolerance={anchor_tolerance}"
+                    )
     elif metrics:
         feet = [metric.foot[1] for metric in metrics]
         if max(feet) - min(feet) > anchor_tolerance:
@@ -211,6 +246,10 @@ def validate_frames(
         "profileFingerprint": profile.fingerprint,
         "tier": tier_name,
         "animation": animation,
+        "placementMode": placement_mode,
+        "enclosedTransparencyPolicy": (
+            "report-only" if placement_mode == "shared-motion" else "profile-gate"
+        ),
         "input": str(Path(input_dir).expanduser().resolve()),
         "frameCount": len(metrics),
         "heightDriftRatio": round(height_drift, 4),

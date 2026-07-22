@@ -16,6 +16,7 @@ from typing import Any
 from PIL import Image
 
 from . import __version__
+from .json_utils import strict_json_loads
 from .profile import Profile
 
 
@@ -46,8 +47,8 @@ def comfy_workflow_path(profile: Profile, value: str | Path | None = None) -> Pa
 def load_comfy_workflow(profile: Profile, value: str | Path | None = None) -> tuple[Path, dict[str, Any]]:
     path = comfy_workflow_path(profile, value)
     try:
-        workflow = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
+        workflow = strict_json_loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, ValueError) as exc:
         raise ValueError(f"invalid ComfyUI workflow JSON {path}: {exc}") from exc
     validate_comfy_workflow(workflow)
     return path, workflow
@@ -286,8 +287,8 @@ def compile_comfy_request(plan: dict[str, Any], workflow: dict[str, Any], refere
 
 def _decode_json_response(response: Any, url: str) -> dict[str, Any]:
     try:
-        return json.loads(response.read().decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return strict_json_loads(response.read().decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise RuntimeError(f"invalid JSON response from ComfyUI: {url}") from exc
 
 

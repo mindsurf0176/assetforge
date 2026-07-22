@@ -10,6 +10,8 @@ from typing import Any
 
 from jsonschema import Draft202012Validator
 
+from .json_utils import strict_json_loads
+
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
 SCHEMA_PATH = PACKAGE_ROOT / "profiles" / "assetforge-profile.schema.json"
@@ -91,8 +93,8 @@ def validate_profile_data(data: dict[str, Any], source: str = "<memory>") -> Non
 def load_profile(value: str | Path) -> Profile:
     path = _profile_path(value)
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
+        data = strict_json_loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, ValueError) as exc:
         raise ProfileError(f"{path}: invalid JSON: {exc}") from exc
     validate_profile_data(data, str(path))
     return Profile(path=path, data=data)

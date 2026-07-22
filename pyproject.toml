@@ -1,11 +1,11 @@
 [build-system]
-requires = ["setuptools>=69"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "assetforge-2d"
-version = "0.2.0"
-description = "Deterministic normalization, validation, and engine export for generated 2D game assets."
+version = "0.3.0"
+description = "Local cutout sprite animation plus deterministic validation and game-engine export."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
@@ -36,7 +36,7 @@ Issues = "https://github.com/mindsurf0176-ui/assetforge/issues"
 assetforge = "assetforge.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["assetforge", "assetforge.profiles", "assetforge.workflows"]
+include = ["assetforge", "assetforge.profiles", "assetforge.schemas", "assetforge.workflows"]
 
 [tool.setuptools.package-data]
-assetforge = ["profiles/*.json", "workflows/*.json"]
+assetforge = ["profiles/*.json", "schemas/*.json", "workflows/*.json"]

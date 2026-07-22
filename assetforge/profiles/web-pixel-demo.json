@@ -11,6 +11,7 @@
       "canvasPolicy": "fixed",
       "canvas": [40, 40],
       "anchor": [20, 37],
+      "contentMin": [8, 8],
       "padding": 2,
       "filtering": "nearest",
       "downscaleFiltering": "box",
@@ -31,6 +32,7 @@
       "maxFrames": 8,
       "fps": 8,
       "loop": true,
+      "anchor": {"maxFootDrift": 3},
       "prompt": "cute readable walk cycle with a stable face and palette"
     },
     "attack": {
@@ -41,7 +43,7 @@
       "prompt": "anticipation, readable attack snap, and recovery"
     },
     "hit": {
-      "minFrames": 2,
+      "minFrames": 3,
       "maxFrames": 5,
       "fps": 10,
       "loop": false,
@@ -75,10 +77,11 @@
     "background": {
       "mode": "transparent-or-corner",
       "tolerance": 42,
-      "maxRepairableEnclosedComponentPixels": 1,
+      "maxRepairableEnclosedComponentPixels": 4,
       "maxEnclosedTransparentPixels": 0
     },
     "alphaThreshold": 20,
+    "partAlpha": {"maxEnclosedTransparentPixels": 64},
     "palette": {"maxColors": 24, "lockAcrossClip": true},
     "anchor": {"type": "bottom-center", "maxFootDrift": 1},
     "identity": {"maxHeightDriftRatio": 0.28, "maxWidthDriftRatio": 0.45}

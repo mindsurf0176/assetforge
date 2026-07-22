@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:assetforge:animation-spec:schema:1",
+  "title": "AssetForge AnimationSpec",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "id",
+    "character",
+    "direction",
+    "rig",
+    "clips",
+    "render"
+  ],
+  "allOf": [
+    {
+      "if": {"required": ["profile"]},
+      "then": {"required": ["tier"]}
+    },
+    {
+      "if": {"required": ["tier"]},
+      "then": {"required": ["profile"]}
+    }
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "minLength": 1
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "character": {
+      "$ref": "#/$defs/identifier"
+    },
+    "direction": {
+      "$ref": "#/$defs/identifier"
+    },
+    "profile": {
+      "type": "string",
+      "minLength": 1
+    },
+    "tier": {
+      "type": "string",
+      "minLength": 1
+    },
+    "rig": {
+      "type": "string",
+      "minLength": 1
+    },
+    "clips": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "$ref": "#/$defs/identifier"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/clipRequest"
+      }
+    },
+    "render": {
+      "$ref": "#/$defs/render"
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "clipRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "frames"
+      ],
+      "properties": {
+        "frames": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "render": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "renderer",
+        "fit"
+      ],
+      "properties": {
+        "renderer": {
+          "const": "local-cutout-v1"
+        },
+        "fit": {
+          "const": "shared-motion-bounds"
+        },
+        "resample": {
+          "enum": [
+            "nearest",
+            "bicubic"
+          ]
+        }
+      }
+    }
+  }
+}

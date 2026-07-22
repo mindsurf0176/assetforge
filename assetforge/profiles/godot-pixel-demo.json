@@ -11,6 +11,7 @@
       "canvasPolicy": "fixed",
       "canvas": [244, 247],
       "anchor": [123, 243],
+      "contentMin": [16, 16],
       "preservePlacement": true,
       "padding": 3,
       "filtering": "nearest",
@@ -22,6 +23,7 @@
       "canvasPolicy": "fixed",
       "canvas": [244, 247],
       "anchor": [123, 243],
+      "contentMin": [16, 16],
       "preservePlacement": false,
       "padding": 12,
       "filtering": "nearest",
@@ -54,14 +56,14 @@
       "prompt": "hold aim toward the right with minimal breathing sway"
     },
     "attack": {
-      "minFrames": 2,
+      "minFrames": 3,
       "maxFrames": 8,
       "fps": 12,
       "loop": false,
       "prompt": "anticipation, attack, recoil, and recovery"
     },
     "hit": {
-      "minFrames": 1,
+      "minFrames": 3,
       "maxFrames": 5,
       "fps": 10,
       "loop": false,
@@ -72,7 +74,7 @@
       "maxFrames": 8,
       "fps": 8,
       "loop": false,
-      "identity": {"maxHeightDriftRatio": 0.35},
+      "identity": {"maxHeightDriftRatio": 0.5},
       "prompt": "stagger, fall, and final grounded pose"
     }
   },
@@ -100,6 +102,7 @@
       "maxEnclosedTransparentPixels": 0
     },
     "alphaThreshold": 20,
+    "partAlpha": {"maxEnclosedTransparentPixels": 64},
     "palette": {"maxColors": 256, "lockAcrossClip": true},
     "anchor": {"type": "bottom-center", "maxFootDrift": 1},
     "identity": {"maxHeightDriftRatio": 0.22, "maxWidthDriftRatio": 0.65}
