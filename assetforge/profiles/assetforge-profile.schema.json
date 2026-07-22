@@ -1,0 +1,217 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:assetforge:profile:schema:1",
+  "title": "AssetForge Project Profile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "id", "kind", "projectRoot", "tiers", "quality", "export"],
+  "properties": {
+    "$schema": {"type": "string", "minLength": 1},
+    "schemaVersion": {"const": 1},
+    "id": {"type": "string", "minLength": 1},
+    "kind": {"enum": ["pixel-character", "cel-rig", "map-object"]},
+    "projectRoot": {"type": "string", "minLength": 1},
+    "directions": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "uniqueItems": true
+    },
+    "mirrorDirections": {
+      "type": "object",
+      "additionalProperties": {"type": "string", "minLength": 1}
+    },
+    "tiers": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {"$ref": "#/$defs/tier"}
+    },
+    "animations": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/animation"}
+    },
+    "generation": {"$ref": "#/$defs/generation"},
+    "quality": {"$ref": "#/$defs/quality"},
+    "providers": {"$ref": "#/$defs/providers"},
+    "export": {"$ref": "#/$defs/export"},
+    "toolchain": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "path"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "path": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "positiveSize": {
+      "type": "array",
+      "prefixItems": [
+        {"type": "integer", "minimum": 1},
+        {"type": "integer", "minimum": 1}
+      ],
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "coordinate": {
+      "type": "array",
+      "prefixItems": [
+        {"type": "integer"},
+        {"type": "integer"}
+      ],
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "rgb": {
+      "type": "array",
+      "prefixItems": [
+        {"type": "integer", "minimum": 0, "maximum": 255},
+        {"type": "integer", "minimum": 0, "maximum": 255},
+        {"type": "integer", "minimum": 0, "maximum": 255}
+      ],
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxHeightDriftRatio": {"type": "number", "minimum": 0},
+        "maxWidthDriftRatio": {"type": "number", "minimum": 0}
+      }
+    },
+    "anchorQuality": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {"type": "string", "minLength": 1},
+        "maxFootDrift": {"type": "integer", "minimum": 0}
+      }
+    },
+    "tier": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["canvasPolicy"],
+      "properties": {
+        "canvasPolicy": {"enum": ["fixed", "union"]},
+        "preservePlacement": {"type": "boolean"},
+        "canvas": {"$ref": "#/$defs/positiveSize"},
+        "anchor": {"$ref": "#/$defs/coordinate"},
+        "contentMax": {"$ref": "#/$defs/positiveSize"},
+        "padding": {"type": "integer", "minimum": 0},
+        "filtering": {"enum": ["nearest", "lanczos", "box"]},
+        "downscaleFiltering": {"enum": ["nearest", "lanczos", "box"]},
+        "allowUpscale": {"type": "boolean"},
+        "previewScale": {"type": "integer", "minimum": 1}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"canvasPolicy": {"const": "fixed"}}},
+          "then": {"required": ["canvas"]}
+        },
+        {
+          "if": {
+            "properties": {"preservePlacement": {"const": true}},
+            "required": ["preservePlacement"]
+          },
+          "then": {"properties": {"canvasPolicy": {"const": "fixed"}}}
+        }
+      ]
+    },
+    "animation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["minFrames", "maxFrames", "fps", "loop"],
+      "properties": {
+        "minFrames": {"type": "integer", "minimum": 1},
+        "maxFrames": {"type": "integer", "minimum": 1},
+        "fps": {"type": "number", "exclusiveMinimum": 0},
+        "loop": {"type": "boolean"},
+        "prompt": {"type": "string"},
+        "identity": {"$ref": "#/$defs/identity"},
+        "anchor": {"$ref": "#/$defs/anchorQuality"}
+      }
+    },
+    "generation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["canvas"],
+      "properties": {
+        "canvas": {"$ref": "#/$defs/positiveSize"},
+        "pixelCanvas": {"$ref": "#/$defs/positiveSize"},
+        "referenceFill": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+        "projection": {"type": "string"},
+        "stylePrompt": {"type": "string"},
+        "backgroundPrompt": {"type": "string"},
+        "referenceBackground": {"$ref": "#/$defs/rgb"},
+        "characters": {
+          "type": "object",
+          "additionalProperties": {"type": "string", "minLength": 1}
+        },
+        "steps": {"type": "integer", "minimum": 1},
+        "cfg": {"type": "number", "minimum": 0},
+        "denoise": {"type": "number", "minimum": 0, "maximum": 1},
+        "negativePrompt": {"type": "string"}
+      }
+    },
+    "quality": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "background": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mode": {"type": "string", "minLength": 1},
+            "tolerance": {"type": "integer", "minimum": 0},
+            "maxRepairableEnclosedComponentPixels": {"type": "integer", "minimum": 0},
+            "maxEnclosedTransparentPixels": {"type": "integer", "minimum": 0}
+          }
+        },
+        "alphaThreshold": {"type": "integer", "minimum": 0, "maximum": 255},
+        "palette": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "maxColors": {"type": "integer", "minimum": 1},
+            "lockAcrossClip": {"type": "boolean"}
+          }
+        },
+        "anchor": {"$ref": "#/$defs/anchorQuality"},
+        "identity": {"$ref": "#/$defs/identity"}
+      }
+    },
+    "providers": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "comfyLocal": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "endpoint": {"type": "string", "minLength": 1},
+            "installationPath": {"type": "string", "minLength": 1},
+            "workflowTemplate": {"type": "string", "minLength": 1},
+            "checkpoint": {"type": "string", "minLength": 1},
+            "lora": {"type": "string", "minLength": 1},
+            "loraStrengthModel": {"type": "number"},
+            "loraStrengthClip": {"type": "number"}
+          }
+        }
+      }
+    },
+    "export": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["engine"],
+      "properties": {
+        "engine": {"enum": ["web", "godot"]},
+        "format": {"enum": ["registry-json", "spriteframes"]},
+        "resourcePrefix": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

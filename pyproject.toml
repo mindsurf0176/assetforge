@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "assetforge-2d"
+version = "0.2.0"
+description = "Deterministic normalization, validation, and engine export for generated 2D game assets."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "jsonschema>=4.21",
+  "numpy>=1.24",
+  "Pillow>=10",
+]
+keywords = ["game-development", "pixel-art", "godot", "asset-pipeline", "comfyui"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Games/Entertainment",
+  "Topic :: Multimedia :: Graphics",
+]
+
+[project.urls]
+Repository = "https://github.com/mindsurf0176-ui/assetforge"
+Issues = "https://github.com/mindsurf0176-ui/assetforge/issues"
+
+[project.scripts]
+assetforge = "assetforge.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["assetforge", "assetforge.profiles", "assetforge.workflows"]
+
+[tool.setuptools.package-data]
+assetforge = ["profiles/*.json", "workflows/*.json"]
