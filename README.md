@@ -2,6 +2,8 @@
 
 AssetForge is a local 2D sprite-animation factory. It turns separated character art into real PNG frame sequences and GIF previews, then normalizes, validates, and exports them for web games or Godot.
 
+The deterministic cutout renderer is a motion-guide and fallback renderer, not a full replacement for a generative sprite model. A PixelLab-class local replacement must redraw every complete frame from an identity reference plus a pose guide. AssetForge therefore keeps final-frame generation and deterministic delivery as separate stages.
+
 The recurring animation path runs locally and does not consume generation credits:
 
 ```text
@@ -22,6 +24,161 @@ It is designed to replace the repeatable sprite-animation and delivery portion o
 - Web registry JSON and Godot `SpriteFrames` exports with referenced PNG files.
 - Strict `RigSpec` and `AnimationSpec` validation, including safe relative part paths and acyclic skeleton checks.
 - Existing AI-generated or hand-drawn frame directories can still use the original `ingest -> validate -> export` pipeline.
+- Paired training-board generation for a local full-frame redraw model: cell 0 contains the identity reference, later cells contain style-free pose guides in the input and complete sprite frames in the target.
+- Fail-closed FLUX.2 edit planning and execution through MFLUX on Apple Silicon, with local-weight, LoRA, disk, input-board, and output checks.
+- Character-held-out batch QC and atomic promotion of passing boards into native transparent sprite frames.
+- Gated MFLUX edit-LoRA training, checkpoint extraction, and local inference without a PixelLab or hosted generation call.
+
+## Build a local full-frame redraw dataset
+
+Use approved, direction-matched animation frames to build paired edit-model training boards. This command does not call PixelLab or any hosted generation API:
+
+```bash
+assetforge redraw-dataset \
+  --spec data/redraw-dataset.json \
+  --output build/redraw-dataset
+```
+
+Each input board contains one identity reference followed by silhouette-and-edge pose guides. The matching target board contains the same identity cell followed by complete RGBA animation frames. Character-level validation holdouts prevent duplicate frames from being mistaken for generalization. The cutout rig may create inference-time pose guides, but its rendered pixels are never accepted as the generated production frame.
+
+The build also writes MFLUX's flat edit-training layout under `mflux/train`. Validation inputs and targets stay under `mflux/holdout`, outside the training directory, so a held-out character cannot leak into training. A rebuild completes in a sibling staging directory and swaps atomically; source, I/O, or disk failures preserve the last successful dataset.
+
+## Run the local full-frame redraw backend
+
+MFLUX is an optional isolated runtime; it is not installed as a core AssetForge dependency. On Apple Silicon, install the tested runtime and a pre-quantized FLUX.2 Klein 4B model:
+
+```bash
+uv venv --python 3.11 ~/.local/share/assetforge/mflux-venv
+uv pip install \
+  --python ~/.local/share/assetforge/mflux-venv/bin/python \
+  'mflux==0.18.0'
+mkdir -p ~/Library/Caches/mflux ~/.local/share/assetforge/models
+
+HF_XET_HIGH_PERFORMANCE=1 \
+  ~/.local/share/assetforge/mflux-venv/bin/hf download \
+  Runpod/FLUX.2-klein-4B-mflux-4bit \
+  --local-dir ~/.local/share/assetforge/models/FLUX.2-klein-4B-mflux-4bit
+```
+
+Keep `flux2-klein-4b` in the local directory name. MFLUX 0.18.0 accepts `--base-model` for FLUX.2 edit but does not pass it through internally; AssetForge detects this upstream behavior and blocks an unrecognizable third-party model path.
+
+Check every prerequisite without loading the model:
+
+```bash
+assetforge mflux-doctor \
+  --model-path ~/.local/share/assetforge/models/FLUX.2-klein-4B-mflux-4bit \
+  --cache-dir ~/Library/Caches/mflux
+```
+
+Build and inspect a deterministic dry-run plan first. Add `--execute` only after the plan reports `ready: true`:
+
+```bash
+assetforge mflux-redraw \
+  --input build/redraw-dataset/samples/validation/creature__east__walk/input.png \
+  --output build/redraw/creature-east-walk.png \
+  --model-path ~/.local/share/assetforge/models/FLUX.2-klein-4B-mflux-4bit \
+  --cache-dir ~/Library/Caches/mflux \
+  --low-ram \
+  --mlx-cache-limit-gib 2.5
+
+assetforge mflux-redraw ... --execute
+```
+
+Pass one or more local adapters with matching scales when a project edit-LoRA is approved:
+
+```bash
+assetforge mflux-redraw ... \
+  --lora models/assetforge-redraw.safetensors --lora-scale 1.0 \
+  --execute
+```
+
+An unadapted base-model result is a connectivity baseline, not a production asset. Promote a generated sheet only after a character-held-out visual comparison confirms identity, outline, palette, pose readability, cell order, and loop continuity. This path does not call PixelLab or require a PixelLab token.
+
+Grade a generated board against its held-out target before any sprite export:
+
+```bash
+assetforge redraw-quality \
+  --manifest build/redraw-dataset/dataset.json \
+  --sample creature__east__walk \
+  --generated build/redraw/creature-east-walk.png
+```
+
+The command fails closed when identity, completed cells, pose-guide removal, unused cells, canvas, or background drift miss the fixed thresholds.
+
+For model promotion, name every generated validation board `<sample-id>.png` and require the complete holdout to pass:
+
+```bash
+assetforge redraw-quality-batch \
+  --manifest build/redraw-dataset/dataset.json \
+  --generated-dir build/redraw/holdout
+```
+
+Only a passing validation board can be split into native transparent frames. The export is staged and atomically swapped, and `frames.json` uses portable relative paths and verified hashes:
+
+```bash
+assetforge redraw-board-export \
+  --manifest build/redraw-dataset/dataset.json \
+  --sample creature__east__walk \
+  --generated build/redraw/holdout/creature__east__walk.png \
+  --output build/frames/creature/east/walk
+```
+
+The resulting frame directory can enter the existing `ingest -> validate -> export` engine pipeline.
+
+## Prepare FLUX.2 edit-LoRA training
+
+The training path is separate from local inference. Validate the exact MFLUX version, base model, physical memory, writable paths, and free disk without importing the weights:
+
+```bash
+assetforge mflux-train-doctor \
+  --model-path ~/.local/share/assetforge/models/FLUX2-klein-base-4B-mlx-4bit \
+  --data-path build/redraw-dataset/mflux/train \
+  --checkpoint-path build/training/run
+```
+
+Build an inspectable config for the complete train split. `--write-config` writes it with exclusive creation and returns the parser-only `mflux-train --dry-run` argument vector:
+
+```bash
+assetforge mflux-train-plan \
+  --manifest build/redraw-dataset/dataset.json \
+  --model-path ~/.local/share/assetforge/models/FLUX2-klein-base-4B-mlx-4bit \
+  --config-output build/training/assetforge-redraw.json \
+  --checkpoint-output build/training/run \
+  --write-config
+```
+
+After inspecting that exact config, repeat the same command with `--execute`. AssetForge re-derives the plan, accepts only an exactly equivalent parsed config, and completes the full host, version, and managed-cache audit before invoking even MFLUX's dry-run. It audits again immediately before launching training with offline model flags. A newly created or changed checkpoint path, a config mismatch, MFLUX other than 0.18.0, less than 24 GiB RAM, less than 20 GiB free disk, or a symlink that could redirect MFLUX's disposable cache outside the training data blocks execution:
+
+```bash
+assetforge mflux-train-plan \
+  --manifest build/redraw-dataset/dataset.json \
+  --model-path ~/.local/share/assetforge/models/FLUX2-klein-base-4B-mlx-4bit \
+  --config-output build/training/assetforge-redraw.json \
+  --checkpoint-output build/training/run \
+  --write-config \
+  --execute
+```
+
+For a parser-only smoke subset, copy deterministic train entries to an isolated directory first, then pass both `--sample-limit` and `--prepared-data-path` to `mflux-train-plan`:
+
+```bash
+assetforge mflux-train-prepare \
+  --manifest build/redraw-dataset/dataset.json \
+  --output build/training/smoke \
+  --sample-limit 2
+```
+
+The generated config contains host-specific absolute paths, so regenerate it on the compatible training host after copying the validated dataset and model. Do not pass it directly to an unrelated CUDA/Diffusers trainer. Keep the holdout directory out of training, and treat fewer than 50 paired boards as a diagnostic run rather than a quality run.
+
+Extract only the LoRA named by a completed MFLUX checkpoint manifest. ZIP traversal, symlinks, corrupt safetensors, missing LoRA tensor pairs, and mismatched MFLUX/model metadata are rejected:
+
+```bash
+assetforge mflux-train-extract \
+  --checkpoint build/training/run/checkpoints/0003200_checkpoint.zip \
+  --output models/assetforge-redraw.safetensors
+```
+
+Pass that adapter to `mflux-redraw`, generate every validation sample, require `redraw-quality-batch` to pass, and only then export production frames.
 
 ## Input quality boundary
 
@@ -242,6 +399,12 @@ assetforge animate --spec hero-east.animation.json
 ```
 
 `--spec` owns all animation settings. Only `--work` may override its default build directory, so conflicting flags fail instead of being silently ignored.
+
+For native pixel rigs whose authored coordinates must not move, give the selected
+profile tier `preservePlacement: true` and make its fixed canvas exactly match
+`RigSpec.canvas`. AssetForge then renders the rig canvas verbatim. Any opaque
+pixel that would cross an edge fails with the clip, frame, and overflow extent;
+it is never silently cropped or rescaled.
 
 ## Output layout
 

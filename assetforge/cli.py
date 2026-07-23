@@ -16,6 +16,24 @@ from .local_animation import (
     run_animation_spec,
     run_local_animation,
 )
+from .mflux_backend import (
+    DEFAULT_BASE_MODEL as MFLUX_DEFAULT_BASE_MODEL,
+    DEFAULT_MODEL as MFLUX_DEFAULT_MODEL,
+    DEFAULT_PROMPT as MFLUX_DEFAULT_PROMPT,
+    mflux_doctor,
+    paired_board_edit_plan,
+    run_mflux_plan,
+)
+from .mflux_checkpoint import extract_mflux_lora_adapter
+from .mflux_training import (
+    MIN_LOCAL_TRAINING_FREE_DISK_GIB,
+    build_mflux_training_plan,
+    compile_mflux_train_command,
+    mflux_training_doctor,
+    prepare_training_data,
+    run_mflux_training_plan,
+    write_mflux_training_config,
+)
 from .profile import ProfileError, list_profiles, load_profile
 from .providers import (
     compile_comfy_request,
@@ -30,6 +48,9 @@ from .providers import (
 )
 from .validation import validate_frames
 from .rig_build import archetypes, extract_part_sheet
+from .redraw_dataset import build_redraw_dataset
+from .redraw_delivery import evaluate_redraw_holdout_batch, export_redraw_board_frames
+from .redraw_quality import evaluate_redraw_sample
 
 
 def emit(value: Any) -> None:
@@ -183,6 +204,137 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--timeout", type=float, default=900)
     p.add_argument("--poll-interval", type=float, default=0.75)
     p.add_argument("--execute", action="store_true")
+
+    p = sub.add_parser(
+        "redraw-dataset",
+        help="build paired identity-plus-pose boards for a local full-frame redraw model",
+    )
+    p.add_argument("--spec", required=True)
+    p.add_argument("--output", required=True)
+
+    p = sub.add_parser("redraw-quality", help="grade a generated board against one dataset holdout")
+    p.add_argument("--manifest", required=True)
+    p.add_argument("--sample", required=True)
+    p.add_argument("--generated", required=True)
+
+    p = sub.add_parser(
+        "redraw-quality-batch",
+        help="grade one generated <sample-id>.png board for every validation holdout",
+    )
+    p.add_argument("--manifest", required=True)
+    p.add_argument("--generated-dir", required=True)
+
+    p = sub.add_parser(
+        "redraw-board-export",
+        help="split one passing redraw board into native transparent sprite frames",
+    )
+    p.add_argument("--manifest", required=True)
+    p.add_argument("--sample", required=True)
+    p.add_argument("--generated", required=True)
+    p.add_argument("--output", required=True)
+    p.add_argument("--background-tolerance", type=int, default=42)
+
+    p = sub.add_parser("mflux-doctor", help="check local FLUX.2 edit inference readiness")
+    p.add_argument("--executable")
+    p.add_argument("--model", default=MFLUX_DEFAULT_MODEL)
+    p.add_argument("--base-model", default=MFLUX_DEFAULT_BASE_MODEL)
+    p.add_argument("--model-path")
+    p.add_argument("--cache-dir")
+    p.add_argument("--lora", action="append")
+    p.add_argument("--disk-path")
+    p.add_argument("--minimum-free-gib", type=float, default=6.0)
+
+    p = sub.add_parser(
+        "mflux-redraw",
+        help="plan or execute one local FLUX.2 full-board redraw",
+    )
+    p.add_argument("--input", required=True)
+    p.add_argument("--output", required=True)
+    p.add_argument("--prompt", default=MFLUX_DEFAULT_PROMPT)
+    p.add_argument("--executable")
+    p.add_argument("--model", default=MFLUX_DEFAULT_MODEL)
+    p.add_argument("--base-model", default=MFLUX_DEFAULT_BASE_MODEL)
+    p.add_argument("--model-path")
+    p.add_argument("--cache-dir")
+    p.add_argument("--lora", action="append")
+    p.add_argument("--lora-scale", action="append", type=float)
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--steps", type=int)
+    p.add_argument("--guidance", type=float, default=1.0)
+    p.add_argument("--quantize", type=int, choices=(3, 4, 5, 6, 8))
+    p.add_argument("--low-ram", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--mlx-cache-limit-gib", type=float, default=2.5)
+    p.add_argument("--metadata", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--minimum-free-gib", type=float, default=6.0)
+    p.add_argument("--overwrite", action="store_true")
+    p.add_argument("--execute", action="store_true")
+
+    p = sub.add_parser(
+        "mflux-train-doctor",
+        help="check local FLUX.2 edit-LoRA training readiness without loading the model",
+    )
+    p.add_argument("--model-path", required=True)
+    p.add_argument("--executable")
+    p.add_argument("--data-path")
+    p.add_argument("--checkpoint-path")
+    p.add_argument("--cache-path")
+    p.add_argument(
+        "--minimum-free-disk-gib",
+        type=float,
+        default=MIN_LOCAL_TRAINING_FREE_DISK_GIB,
+    )
+
+    p = sub.add_parser(
+        "mflux-train-prepare",
+        help="copy a deterministic train-only subset for an edit-LoRA smoke test",
+    )
+    p.add_argument("--manifest", required=True)
+    p.add_argument("--output", required=True)
+    p.add_argument("--sample-limit", required=True, type=int)
+
+    p = sub.add_parser(
+        "mflux-train-plan",
+        help="validate, dry-run, or explicitly train a FLUX.2 edit-LoRA",
+    )
+    p.add_argument("--manifest", required=True)
+    p.add_argument("--model-path", required=True)
+    p.add_argument("--config-output", required=True)
+    p.add_argument("--prepared-data-path")
+    p.add_argument("--sample-limit", type=int)
+    p.add_argument("--checkpoint-output")
+    p.add_argument("--executable")
+    p.add_argument("--low-ram", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--max-resolution", type=int, default=576)
+    p.add_argument("--epochs", type=int, default=100)
+    p.add_argument("--batch-size", type=int, default=1)
+    p.add_argument("--learning-rate", type=float, default=1e-4)
+    p.add_argument("--checkpoint-frequency", type=int, default=25)
+    p.add_argument("--plot-frequency", type=int, default=1)
+    p.add_argument("--generate-image-frequency", type=int, default=20)
+    p.add_argument("--lora-rank", type=int, default=16)
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument(
+        "--minimum-free-disk-gib",
+        type=float,
+        default=MIN_LOCAL_TRAINING_FREE_DISK_GIB,
+    )
+    p.add_argument(
+        "--write-config",
+        action="store_true",
+        help="write the validated config with exclusive creation",
+    )
+    p.add_argument(
+        "--execute",
+        action="store_true",
+        help="on a compatible host, run parser validation and then start training",
+    )
+
+    p = sub.add_parser(
+        "mflux-train-extract",
+        help="safely extract the manifest-selected LoRA from an MFLUX checkpoint",
+    )
+    p.add_argument("--checkpoint", required=True)
+    p.add_argument("--output", required=True)
     return root
 
 
@@ -258,6 +410,146 @@ def main(argv: list[str] | None = None) -> int:
                 )
             emit(result)
             return 0 if result.get("ok") else 1
+        if args.command == "redraw-dataset":
+            emit(build_redraw_dataset(args.spec, args.output))
+            return 0
+        if args.command == "redraw-quality":
+            result = evaluate_redraw_sample(args.manifest, args.sample, args.generated)
+            emit(result)
+            return 0 if result["ok"] else 1
+        if args.command == "redraw-quality-batch":
+            result = evaluate_redraw_holdout_batch(args.manifest, args.generated_dir)
+            emit(result)
+            return 0 if result["ok"] else 1
+        if args.command == "redraw-board-export":
+            result = export_redraw_board_frames(
+                args.manifest,
+                args.sample,
+                args.generated,
+                args.output,
+                background_tolerance=args.background_tolerance,
+            )
+            emit(result)
+            return 0
+        if args.command == "mflux-doctor":
+            result = mflux_doctor(
+                executable=args.executable,
+                model=args.model,
+                base_model=args.base_model,
+                model_path=args.model_path,
+                cache_dir=args.cache_dir,
+                lora=args.lora,
+                disk_path=args.disk_path,
+                minimum_free_gib=args.minimum_free_gib,
+            )
+            emit(result)
+            return 0 if result["ok"] else 1
+        if args.command == "mflux-redraw":
+            lora_scale: float | list[float] = args.lora_scale or 1.0
+            plan_data = paired_board_edit_plan(
+                args.input,
+                args.output,
+                prompt=args.prompt,
+                executable=args.executable,
+                model=args.model,
+                base_model=args.base_model,
+                model_path=args.model_path,
+                cache_dir=args.cache_dir,
+                lora=args.lora,
+                lora_scale=lora_scale,
+                seed=args.seed,
+                steps=args.steps,
+                guidance=args.guidance,
+                quantize=args.quantize,
+                low_ram=args.low_ram,
+                mlx_cache_limit_gib=args.mlx_cache_limit_gib,
+                metadata=args.metadata,
+                overwrite=args.overwrite,
+                minimum_free_gib=args.minimum_free_gib,
+            )
+            if not args.execute:
+                plan_data["dryRun"] = True
+                emit(plan_data)
+                return 0 if plan_data["ready"] else 1
+            emit(run_mflux_plan(plan_data, execute=True))
+            return 0
+        if args.command == "mflux-train-doctor":
+            result = mflux_training_doctor(
+                model_path=args.model_path,
+                executable=args.executable,
+                data_path=args.data_path,
+                checkpoint_path=args.checkpoint_path,
+                cache_path=args.cache_path,
+                minimum_free_disk_gib=args.minimum_free_disk_gib,
+            )
+            emit(result)
+            return 0 if result["localTrainingReady"] else 1
+        if args.command == "mflux-train-prepare":
+            result = prepare_training_data(
+                args.manifest,
+                args.output,
+                sample_limit=args.sample_limit,
+            )
+            emit(result)
+            return 0
+        if args.command == "mflux-train-plan":
+            plan_data = build_mflux_training_plan(
+                args.manifest,
+                model_path=args.model_path,
+                config_output=args.config_output,
+                prepared_data_path=args.prepared_data_path,
+                sample_limit=args.sample_limit,
+                checkpoint_output=args.checkpoint_output,
+                executable=args.executable,
+                low_ram=args.low_ram,
+                max_resolution=args.max_resolution,
+                epochs=args.epochs,
+                batch_size=args.batch_size,
+                learning_rate=args.learning_rate,
+                checkpoint_frequency=args.checkpoint_frequency,
+                plot_frequency=args.plot_frequency,
+                generate_image_frequency=args.generate_image_frequency,
+                lora_rank=args.lora_rank,
+                seed=args.seed,
+                minimum_free_disk_gib=args.minimum_free_disk_gib,
+                allow_existing_config=args.execute,
+            )
+            config_path = Path(plan_data["configOutput"])
+            config_exists = config_path.is_file() and not config_path.is_symlink()
+            if args.execute and not args.write_config and not config_exists:
+                raise ValueError(
+                    "--execute requires --write-config or an existing config that exactly "
+                    "matches the newly validated plan"
+                )
+            if args.execute and not plan_data["ready"]:
+                plan_data["writtenConfig"] = (
+                    str(config_path.resolve()) if plan_data["configReused"] else None
+                )
+                plan_data["dryRunCommand"] = None
+                plan_data["training"] = None
+                emit(plan_data)
+                return 1
+            if args.write_config or args.execute:
+                plan_data["writtenConfig"] = (
+                    str(config_path.resolve())
+                    if plan_data["configReused"]
+                    else str(write_mflux_training_config(plan_data))
+                )
+                plan_data["dryRunCommand"] = compile_mflux_train_command(plan_data)
+                plan_data["training"] = (
+                    run_mflux_training_plan(plan_data, execute=True)
+                    if args.execute
+                    else None
+                )
+            else:
+                plan_data["writtenConfig"] = None
+                plan_data["dryRunCommand"] = None
+                plan_data["training"] = None
+            emit(plan_data)
+            return 0 if plan_data["ready"] else 1
+        if args.command == "mflux-train-extract":
+            emit(extract_mflux_lora_adapter(args.checkpoint, args.output))
+            return 0
         profile = load_profile(args.profile)
         if args.command == "doctor":
             result = doctor(profile)

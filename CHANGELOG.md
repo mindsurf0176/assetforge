@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+- Preserve a hand-authored RigSpec canvas verbatim when the selected profile tier uses `preservePlacement=true`.
+- Reject RigSpec/profile canvas mismatches and report any nontransparent per-frame overflow instead of silently cropping identity-locked sprites.
+- Add `redraw-dataset` and a strict dataset schema for building identity-plus-pose input boards paired with complete animation target boards for a local full-frame redraw model.
+- Keep whole-character validation holdouts so repeated frames from one identity cannot be reported as cross-character generalization.
+- Add a fail-closed Apple-Silicon MFLUX/FLUX.2 edit backend with dry-run plans, explicit execution, low-RAM controls, multiple LoRAs, complete-shard checks, and output verification.
+- Publish generated PNG and metadata sidecar pairs with backup-and-rollback so a partial sidecar failure preserves the previous approved result.
+- Export redraw pairs in MFLUX flat edit-LoRA layout while keeping validation characters outside the training directory.
+- Add quantitative held-out redraw gates for identity, completed cells, pose-guide removal, unused cells, and background drift.
+- Add strict MFLUX edit-LoRA dataset validation, train-only subset preparation, base-model shard checks, config planning, and dry-run command compilation.
+- Build redraw datasets and promoted frame exports in sibling staging trees, then atomically swap or roll back without destroying the last successful output.
+- Add complete validation-holdout batch QC and split only passing boards into hashed, portable, native transparent frame sequences.
+- Detect the exact adjacent MFLUX 0.18.0 runtime and gate training on 24 GiB physical memory, 20 GiB free disk, and writable data, cache, and checkpoint paths.
+- Add explicit gated edit-LoRA execution that validates an exact reusable config, verifies MFLUX before any subprocess, re-audits before training, and refuses implicit downloads or checkpoint reuse.
+- Constrain MFLUX's disposable cache to a non-symlinked directory inside the validated training data so cache cleanup cannot escape that boundary.
+- Safely extract the manifest-selected FLUX.2 Klein 4B LoRA from MFLUX checkpoint directories or ZIPs while rejecting archive traversal, symlinks, corrupt tensors, and mismatched metadata.
+
 ## 0.3.0
 
 - Added a fully local deterministic cutout renderer that generates real PNG frames and GIF previews.

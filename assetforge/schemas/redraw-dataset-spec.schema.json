@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/mindsurf0176-ui/assetforge/schemas/redraw-dataset-spec.schema.json",
+  "title": "AssetForge full-frame redraw dataset specification",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "id",
+    "nativeCanvas",
+    "validationCharacters",
+    "board",
+    "characters"
+  ],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$"},
+    "description": {"type": "string"},
+    "nativeCanvas": {
+      "type": "array",
+      "prefixItems": [
+        {"type": "integer", "minimum": 1},
+        {"type": "integer", "minimum": 1}
+      ],
+      "items": false
+    },
+    "alphaThreshold": {"type": "integer", "minimum": 0, "maximum": 255},
+    "validationCharacters": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$"}
+    },
+    "board": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cellSize", "columns", "rows", "trainingScale", "background"],
+      "properties": {
+        "cellSize": {"type": "integer", "minimum": 1},
+        "columns": {"type": "integer", "minimum": 2},
+        "rows": {"type": "integer", "minimum": 1},
+        "trainingScale": {"type": "integer", "minimum": 1},
+        "background": {
+          "type": "array",
+          "prefixItems": [
+            {"type": "integer", "minimum": 0, "maximum": 255},
+            {"type": "integer", "minimum": 0, "maximum": 255},
+            {"type": "integer", "minimum": 0, "maximum": 255}
+          ],
+          "items": false
+        }
+      }
+    },
+    "characters": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "root", "referencePattern", "directions", "clips"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$"},
+          "root": {"type": "string", "minLength": 1},
+          "referencePattern": {"type": "string", "minLength": 1},
+          "directions": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {"type": "string", "minLength": 1}
+          },
+          "clips": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["id", "framePattern", "expectedFrames", "loop"],
+              "properties": {
+                "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$"},
+                "framePattern": {"type": "string", "minLength": 1},
+                "expectedFrames": {"type": "integer", "minimum": 2, "maximum": 8},
+                "loop": {"type": "boolean"}
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
