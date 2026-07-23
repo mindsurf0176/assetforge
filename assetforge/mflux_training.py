@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import csv
 import hashlib
+import io
 import json
 import math
 import os
@@ -8,6 +10,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -24,6 +27,14 @@ MFLUX_TRAINING_MODEL = "flux2-klein-base-4b"
 MIN_RECOMMENDED_SAMPLES = 50
 MIN_LOCAL_TRAINING_RAM_GIB = 24.0
 MIN_LOCAL_TRAINING_FREE_DISK_GIB = 20.0
+MIN_CUDA_TRAINING_VRAM_GIB = 23.0
+MIN_CUDA_COMPUTE_CAPABILITY = 7.5
+MIN_CUDA13_DRIVER_MAJOR = 580
+DEFAULT_TARGET_UPDATES = 1500
+PORTABLE_BUNDLE_FILENAME = "assetforge-mflux-bundle.json"
+PORTABLE_BUNDLE_KIND = "assetforge-mflux-training-bundle"
+PORTABLE_BUNDLE_SCHEMA_VERSION = 2
+PORTABLE_BUNDLE_FORMAT = "paired-edit-lora-portable-v2"
 
 _ENTRY_KEYS = {"index", "sample", "input", "target", "prompt", "promptIndex"}
 _MODEL_WEIGHT_SUFFIXES = {".safetensors"}
@@ -91,7 +102,13 @@ def _relative_path(value: Any, *, label: str) -> PurePosixPath:
 
 
 def _resolve_child(root: Path, relative: PurePosixPath, *, label: str) -> Path:
-    candidate = root.joinpath(*relative.parts).resolve()
+    candidate = root.joinpath(*relative.parts)
+    current = candidate
+    while current != root:
+        if current.is_symlink():
+            raise ValueError(f"{label} contains a symbolic link: {current}")
+        current = current.parent
+    candidate = candidate.resolve()
     try:
         candidate.relative_to(root)
     except ValueError as exc:
@@ -99,48 +116,94 @@ def _resolve_child(root: Path, relative: PurePosixPath, *, label: str) -> Path:
     return candidate
 
 
-def _read_png(path: Path, *, label: str) -> tuple[tuple[int, int], str]:
+def _paths_overlap(left: str | Path, right: str | Path) -> bool:
+    left_path = Path(left).expanduser().resolve()
+    right_path = Path(right).expanduser().resolve()
+    try:
+        left_path.relative_to(right_path)
+        return True
+    except ValueError:
+        pass
+    try:
+        right_path.relative_to(left_path)
+        return True
+    except ValueError:
+        return False
+
+
+def _reject_symlink_components(value: str | Path, *, label: str) -> None:
+    candidate = Path(os.path.abspath(os.path.expanduser(str(value))))
+    while True:
+        # Root-level compatibility links such as macOS /var -> /private/var
+        # require administrator control. Reject symlinks below that trusted
+        # system boundary, where a dataset owner can redirect paths.
+        if candidate.parent != Path(candidate.anchor) and candidate.is_symlink():
+            raise ValueError(f"{label} contains a symbolic link: {candidate}")
+        parent = candidate.parent
+        if parent == candidate:
+            return
+        candidate = parent
+
+
+def _inspect_png(path: Path, *, label: str) -> tuple[tuple[int, int], str, str]:
     if path.is_symlink() or not path.is_file():
         raise FileNotFoundError(f"{label} is not a regular file: {path}")
     try:
-        with Image.open(path) as opened:
+        raw = path.read_bytes()
+        with Image.open(io.BytesIO(raw)) as opened:
             if opened.format != "PNG":
                 raise ValueError(f"{label} must contain PNG data: {path}")
             size = opened.size
             opened.verify()
-        with Image.open(path) as opened:
+        with Image.open(io.BytesIO(raw)) as opened:
             rendered = opened.convert("RGB")
             rendered.load()
     except (OSError, UnidentifiedImageError) as exc:
         raise ValueError(f"{label} is not a readable PNG: {path}") from exc
     if size[0] < 16 or size[1] < 16:
         raise ValueError(f"{label} must be at least 16x16: {path}")
-    return size, hashlib.sha256(rendered.tobytes()).hexdigest()
+    return (
+        size,
+        hashlib.sha256(rendered.tobytes()).hexdigest(),
+        hashlib.sha256(raw).hexdigest(),
+    )
 
 
-def _read_prompt(path: Path, *, label: str) -> str:
+def _read_png(path: Path, *, label: str) -> tuple[tuple[int, int], str]:
+    size, pixel_digest, _ = _inspect_png(path, label=label)
+    return size, pixel_digest
+
+
+def _inspect_prompt(path: Path, *, label: str) -> tuple[str, str]:
     if path.is_symlink() or not path.is_file():
         raise FileNotFoundError(f"{label} is not a regular file: {path}")
     try:
-        value = path.read_text(encoding="utf-8").strip()
+        raw = path.read_bytes()
+        value = raw.decode("utf-8").strip()
     except (OSError, UnicodeError) as exc:
         raise ValueError(f"{label} is not readable UTF-8: {path}") from exc
     if not value or "\0" in value:
         raise ValueError(f"{label} must contain a non-empty prompt: {path}")
+    return value, hashlib.sha256(raw).hexdigest()
+
+
+def _read_prompt(path: Path, *, label: str) -> str:
+    value, _ = _inspect_prompt(path, label=label)
     return value
 
 
-def _load_manifest(manifest: str | Path) -> tuple[Path, dict[str, Any]]:
+def _load_manifest(manifest: str | Path) -> tuple[Path, dict[str, Any], str]:
     manifest_path = Path(manifest).expanduser().resolve()
     if not manifest_path.is_file():
         raise FileNotFoundError(f"redraw dataset manifest not found: {manifest_path}")
     try:
-        value = strict_json_loads(manifest_path.read_text(encoding="utf-8"))
+        raw = manifest_path.read_bytes()
+        value = strict_json_loads(raw.decode("utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"redraw dataset manifest is not readable JSON: {manifest_path}") from exc
     if not isinstance(value, dict):
         raise ValueError("redraw dataset manifest root must be an object")
-    return manifest_path, value
+    return manifest_path, value, hashlib.sha256(raw).hexdigest()
 
 
 def _validate_split(
@@ -150,6 +213,7 @@ def _validate_split(
     split: str,
     prompt_count: int,
     canonical_samples: Mapping[str, Mapping[str, Any]],
+    allow_managed_cache: bool = False,
 ) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"mflux.{split} must be an object")
@@ -165,6 +229,7 @@ def _validate_split(
 
     entries: list[dict[str, Any]] = []
     samples: set[str] = set()
+    characters: set[str] = set()
     files: set[Path] = set()
     all_sizes: set[tuple[int, int]] = set()
     for position, raw_entry in enumerate(entries_value, start=1):
@@ -183,6 +248,8 @@ def _validate_split(
         expected_split = "train" if split == "train" else "validation"
         if canonical is None or canonical.get("split") != expected_split:
             raise ValueError(f"{label}.sample is not a canonical {expected_split} sample")
+        character = canonical["character"]
+        characters.add(character)
         prompt_index = _integer(raw_entry["promptIndex"], label=f"{label}.promptIndex")
         if prompt_index >= prompt_count:
             raise ValueError(f"{label}.promptIndex must be less than mflux.promptCount")
@@ -215,8 +282,12 @@ def _validate_split(
         if not input_base.isdigit() or int(input_base) != index:
             raise ValueError(f"{label} triplet basename must encode its index")
 
-        input_size, input_digest = _read_png(absolute["input"], label=f"{label}.input")
-        target_size, target_digest = _read_png(absolute["target"], label=f"{label}.target")
+        input_size, input_digest, input_byte_digest = _inspect_png(
+            absolute["input"], label=f"{label}.input"
+        )
+        target_size, target_digest, target_byte_digest = _inspect_png(
+            absolute["target"], label=f"{label}.target"
+        )
         if input_size != target_size:
             raise ValueError(f"{label} input and target PNG sizes differ")
         if input_digest != canonical["inputPixelSha256"]:
@@ -224,17 +295,48 @@ def _validate_split(
         if target_digest != canonical["targetPixelSha256"]:
             raise ValueError(f"{label}.target pixels differ from canonical sample {sample!r}")
         all_sizes.add(input_size)
-        _read_prompt(absolute["prompt"], label=f"{label}.prompt")
+        prompt_text, prompt_byte_digest = _inspect_prompt(
+            absolute["prompt"], label=f"{label}.prompt"
+        )
         entries.append(
             {
                 "index": index,
                 "sample": sample,
+                "character": character,
                 "promptIndex": prompt_index,
                 "input": str(absolute["input"]),
                 "target": str(absolute["target"]),
                 "prompt": str(absolute["prompt"]),
+                "inputPixelSha256": input_digest,
+                "targetPixelSha256": target_digest,
+                "promptText": prompt_text,
+                "sourceSha256": {
+                    "input": input_byte_digest,
+                    "target": target_byte_digest,
+                    "prompt": prompt_byte_digest,
+                },
             }
         )
+
+    actual_files: set[Path] = set()
+    unexpected_children = []
+    for candidate in split_path.iterdir():
+        if candidate.is_symlink():
+            unexpected_children.append(candidate.name)
+            continue
+        if candidate.is_file():
+            actual_files.add(candidate.resolve())
+            continue
+        if (
+            allow_managed_cache
+            and split == "train"
+            and candidate.name == ".mflux_cache"
+            and candidate.is_dir()
+        ):
+            continue
+        unexpected_children.append(candidate.name)
+    if actual_files != files or unexpected_children:
+        raise ValueError(f"mflux.{split} contains missing or unexpected files")
 
     if len(all_sizes) != 1:
         rendered = ", ".join(f"{width}x{height}" for width, height in sorted(all_sizes))
@@ -246,14 +348,19 @@ def _validate_split(
         "imageSize": [width, height],
         "entries": entries,
         "samples": sorted(samples),
+        "characters": sorted(characters),
         "files": sorted(str(path) for path in files),
     }
 
 
-def validate_redraw_training_dataset(manifest: str | Path) -> dict[str, Any]:
+def validate_redraw_training_dataset(
+    manifest: str | Path,
+    *,
+    allow_managed_cache: bool = False,
+) -> dict[str, Any]:
     """Strictly validate AssetForge's paired MFLUX train and holdout exports."""
 
-    manifest_path, value = _load_manifest(manifest)
+    manifest_path, value, manifest_sha256 = _load_manifest(manifest)
     mflux = value.get("mflux")
     if not isinstance(mflux, dict):
         raise ValueError("redraw dataset manifest must contain an mflux object")
@@ -278,7 +385,8 @@ def validate_redraw_training_dataset(manifest: str | Path) -> dict[str, Any]:
         if sample_id in declared:
             raise ValueError(f"manifest samples contains duplicate id {sample_id!r}")
         declared[sample_id] = split
-        canonical: dict[str, Any] = {"split": split}
+        character = _clean_string(sample.get("character"), label=f"samples[{position}].character")
+        canonical: dict[str, Any] = {"split": split, "character": character}
         for field, digest_field in (
             ("input", "inputPixelSha256"),
             ("target", "targetPixelSha256"),
@@ -295,6 +403,21 @@ def validate_redraw_training_dataset(manifest: str | Path) -> dict[str, Any]:
                 raise ValueError(f"samples[{position}].{field} pixels do not match {digest_field}")
             canonical[digest_field] = declared_digest
         canonical_samples[sample_id] = canonical
+
+    for split_name in ("train", "validation"):
+        for digest_field in ("inputPixelSha256", "targetPixelSha256"):
+            seen_digests: dict[str, str] = {}
+            for sample_id, sample in canonical_samples.items():
+                if sample["split"] != split_name:
+                    continue
+                digest = sample[digest_field]
+                previous = seen_digests.get(digest)
+                if previous is not None:
+                    raise ValueError(
+                        f"{split_name} samples must have independent {digest_field} pixels: "
+                        f"{previous!r} and {sample_id!r} are identical"
+                    )
+                seen_digests[digest] = sample_id
 
     train_target_digests = {
         sample["targetPixelSha256"]: sample_id
@@ -314,12 +437,27 @@ def validate_redraw_training_dataset(manifest: str | Path) -> dict[str, Any]:
             f"{train_target_digests[digest]!r} and {holdout_target_digests[digest]!r}"
         )
 
+    train_image_digests: dict[str, str] = {}
+    holdout_image_digests: dict[str, str] = {}
+    for sample_id, sample in canonical_samples.items():
+        destination = train_image_digests if sample["split"] == "train" else holdout_image_digests
+        for digest_field in ("inputPixelSha256", "targetPixelSha256"):
+            destination.setdefault(sample[digest_field], f"{sample_id}.{digest_field}")
+    duplicate_image_digests = sorted(set(train_image_digests) & set(holdout_image_digests))
+    if duplicate_image_digests:
+        digest = duplicate_image_digests[0]
+        raise ValueError(
+            "train and holdout contain identical canonical image pixels: "
+            f"{train_image_digests[digest]!r} and {holdout_image_digests[digest]!r}"
+        )
+
     train = _validate_split(
         root,
         mflux["train"],
         split="train",
         prompt_count=prompt_count,
         canonical_samples=canonical_samples,
+        allow_managed_cache=allow_managed_cache,
     )
     holdout = _validate_split(
         root,
@@ -339,6 +477,14 @@ def validate_redraw_training_dataset(manifest: str | Path) -> dict[str, Any]:
         raise ValueError("holdout files are mixed into train entries")
     if train["imageSize"] != holdout["imageSize"]:
         raise ValueError("train and holdout image sizes must match")
+    if any(dimension % 16 for dimension in train["imageSize"]):
+        raise ValueError("MFLUX training board width and height must both be divisible by 16")
+    overlapping_characters = sorted(set(train["characters"]) & set(holdout["characters"]))
+    if overlapping_characters:
+        raise ValueError(
+            "validation characters must be held out from every train sample: "
+            + ", ".join(overlapping_characters)
+        )
 
     splits = value.get("splits")
     if not isinstance(splits, dict):
@@ -362,9 +508,10 @@ def validate_redraw_training_dataset(manifest: str | Path) -> dict[str, Any]:
         )
     return {
         "ok": True,
+        "sourceType": "redraw-dataset",
         "datasetId": _clean_string(value.get("id"), label="redraw dataset id"),
         "manifest": str(manifest_path),
-        "manifestSha256": _sha256(manifest_path),
+        "manifestSha256": manifest_sha256,
         "root": str(root),
         "format": mflux["format"],
         "promptCount": prompt_count,
@@ -445,6 +592,10 @@ def prepare_training_data(
                 source = Path(entry[field])
                 destination = data_path / source.name
                 _copy_exclusive(source, destination)
+                if _sha256(destination) != entry["sourceSha256"][field]:
+                    raise RuntimeError(
+                        f"source training file changed during subset preparation: {source}"
+                    )
                 files[field] = destination.name
                 hashes[field] = _sha256(destination)
             metadata_entries.append(
@@ -478,6 +629,550 @@ def prepare_training_data(
         "sampleLimit": len(selected),
         "samples": [entry["sample"] for entry in selected],
         "artifactManifest": str((data_path / "assetforge-training-subset.json").resolve()),
+    }
+
+
+def _portable_bundle_manifest_path(bundle: str | Path) -> Path:
+    raw = Path(bundle).expanduser()
+    _reject_symlink_components(raw, label="portable training bundle path")
+    lexical = raw / PORTABLE_BUNDLE_FILENAME if raw.is_dir() else raw
+    _reject_symlink_components(lexical, label="portable training bundle manifest")
+    if not lexical.is_file():
+        raise FileNotFoundError(f"portable training bundle manifest not found: {lexical}")
+    return lexical.resolve()
+
+
+def _normalize_external_model_lock(
+    value: Any,
+    *,
+    label: str,
+    included: bool | None,
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be an object")
+    expected_keys = {
+        "family",
+        "layout",
+        "fileCount",
+        "totalBytes",
+        "fingerprintSha256",
+        "files",
+    }
+    if included is not None:
+        expected_keys.add("included")
+    _strict_keys(value, expected_keys, label=label)
+    if value["family"] != MFLUX_TRAINING_MODEL:
+        raise ValueError(f"{label}.family must be {MFLUX_TRAINING_MODEL}")
+    if value["layout"] not in {"mflux-component-sharded", "diffusers"}:
+        raise ValueError(f"{label}.layout is unsupported")
+    if included is not None and value["included"] is not included:
+        raise ValueError(f"{label}.included must be {str(included).lower()}")
+    file_count = _integer(value["fileCount"], label=f"{label}.fileCount", minimum=1)
+    total_bytes = _integer(value["totalBytes"], label=f"{label}.totalBytes", minimum=1)
+    fingerprint = _clean_string(
+        value["fingerprintSha256"],
+        label=f"{label}.fingerprintSha256",
+    )
+    if not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+        raise ValueError(f"{label}.fingerprintSha256 must be a lowercase SHA-256")
+    raw_files = value["files"]
+    if not isinstance(raw_files, list) or len(raw_files) != file_count:
+        raise ValueError(f"{label}.files length must match fileCount")
+
+    files: list[dict[str, Any]] = []
+    seen_paths: set[str] = set()
+    summed_bytes = 0
+    for position, raw_file in enumerate(raw_files):
+        file_label = f"{label}.files[{position}]"
+        if not isinstance(raw_file, dict):
+            raise ValueError(f"{file_label} must be an object")
+        _strict_keys(raw_file, {"path", "bytes", "sha256"}, label=file_label)
+        relative = _relative_path(raw_file["path"], label=f"{file_label}.path")
+        logical = relative.as_posix()
+        if logical in seen_paths:
+            raise ValueError(f"{label}.files contains duplicate path {logical!r}")
+        seen_paths.add(logical)
+        size = _integer(raw_file["bytes"], label=f"{file_label}.bytes", minimum=1)
+        digest = _clean_string(raw_file["sha256"], label=f"{file_label}.sha256")
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError(f"{file_label}.sha256 must be a lowercase SHA-256")
+        summed_bytes += size
+        files.append({"path": logical, "bytes": size, "sha256": digest})
+    if files != sorted(files, key=lambda item: item["path"]):
+        raise ValueError(f"{label}.files must be sorted by path")
+    if summed_bytes != total_bytes:
+        raise ValueError(f"{label}.totalBytes does not match files")
+    calculated_fingerprint = hashlib.sha256(
+        json.dumps(
+            files,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    if calculated_fingerprint != fingerprint:
+        raise ValueError(f"{label}.fingerprintSha256 does not match files")
+    normalized = {
+        "family": MFLUX_TRAINING_MODEL,
+        "layout": value["layout"],
+        "fileCount": file_count,
+        "totalBytes": total_bytes,
+        "fingerprintSha256": fingerprint,
+        "files": files,
+    }
+    if included is not None:
+        normalized["included"] = included
+    return normalized
+
+
+def validate_portable_training_bundle(
+    bundle: str | Path,
+    *,
+    allow_managed_cache: bool = False,
+) -> dict[str, Any]:
+    """Validate a train-only, byte-pinned MFLUX bundle after transfer to another host."""
+
+    manifest_path = _portable_bundle_manifest_path(bundle)
+    try:
+        manifest_bytes = manifest_path.read_bytes()
+        value = strict_json_loads(manifest_bytes.decode("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"portable training bundle manifest is not readable JSON: {manifest_path}") from exc
+    if not isinstance(value, dict):
+        raise ValueError("portable training bundle manifest root must be an object")
+    _strict_keys(
+        value,
+        {"schemaVersion", "kind", "format", "source", "holdout", "model", "data"},
+        label="portable training bundle",
+    )
+    if value["schemaVersion"] != PORTABLE_BUNDLE_SCHEMA_VERSION:
+        raise ValueError(
+            "unsupported portable training bundle schemaVersion; "
+            f"expected {PORTABLE_BUNDLE_SCHEMA_VERSION}, rebuild it with the current AssetForge"
+        )
+    if value["kind"] != PORTABLE_BUNDLE_KIND:
+        raise ValueError(f"portable training bundle kind must be {PORTABLE_BUNDLE_KIND}")
+    if value["format"] != PORTABLE_BUNDLE_FORMAT:
+        raise ValueError(f"portable training bundle format must be {PORTABLE_BUNDLE_FORMAT}")
+
+    source = value["source"]
+    if not isinstance(source, dict):
+        raise ValueError("portable training bundle source must be an object")
+    _strict_keys(
+        source,
+        {
+            "datasetId",
+            "manifestSha256",
+            "trainSampleCount",
+            "holdoutSampleCount",
+            "promptCount",
+            "trainCharacters",
+            "holdoutCharacters",
+        },
+        label="portable training bundle source",
+    )
+    dataset_id = _clean_string(source["datasetId"], label="portable source.datasetId")
+    source_manifest_sha256 = _clean_string(
+        source["manifestSha256"], label="portable source.manifestSha256"
+    )
+    if not re.fullmatch(r"[0-9a-f]{64}", source_manifest_sha256):
+        raise ValueError("portable source.manifestSha256 must be a lowercase SHA-256")
+    train_count = _integer(
+        source["trainSampleCount"], label="portable source.trainSampleCount", minimum=1
+    )
+    holdout_count = _integer(
+        source["holdoutSampleCount"], label="portable source.holdoutSampleCount", minimum=1
+    )
+    prompt_count = _integer(source["promptCount"], label="portable source.promptCount", minimum=1)
+    train_characters = source["trainCharacters"]
+    holdout_characters = source["holdoutCharacters"]
+    for characters, label in (
+        (train_characters, "portable source.trainCharacters"),
+        (holdout_characters, "portable source.holdoutCharacters"),
+    ):
+        if not isinstance(characters, list) or not characters:
+            raise ValueError(f"{label} must be a non-empty list")
+        cleaned = [_clean_string(character, label=label) for character in characters]
+        if cleaned != sorted(set(cleaned)):
+            raise ValueError(f"{label} must be sorted and unique")
+    if set(train_characters) & set(holdout_characters):
+        raise ValueError("portable train and holdout character sets must be disjoint")
+
+    model_lock = _normalize_external_model_lock(
+        value["model"],
+        label="portable training bundle model",
+        included=False,
+    )
+
+    holdout = value["holdout"]
+    if not isinstance(holdout, dict):
+        raise ValueError("portable training bundle holdout must be an object")
+    _strict_keys(
+        holdout,
+        {"included", "sampleCount", "samples"},
+        label="portable training bundle holdout",
+    )
+    if holdout["included"] is not False:
+        raise ValueError("portable training bundle must exclude holdout files")
+    if _integer(holdout["sampleCount"], label="portable holdout.sampleCount", minimum=1) != holdout_count:
+        raise ValueError("portable holdout.sampleCount does not match source.holdoutSampleCount")
+    holdout_samples = holdout["samples"]
+    if not isinstance(holdout_samples, list) or len(holdout_samples) != holdout_count:
+        raise ValueError("portable holdout.samples length must match source.holdoutSampleCount")
+    cleaned_holdout_samples = [
+        _clean_string(sample, label="portable holdout.samples") for sample in holdout_samples
+    ]
+    if cleaned_holdout_samples != sorted(set(cleaned_holdout_samples)):
+        raise ValueError("portable holdout.samples must be sorted and unique")
+
+    data = value["data"]
+    if not isinstance(data, dict):
+        raise ValueError("portable training bundle data must be an object")
+    _strict_keys(data, {"path", "sampleCount", "imageSize", "entries"}, label="portable data")
+    data_relative = _relative_path(data["path"], label="portable data.path")
+    if data_relative != PurePosixPath("data"):
+        raise ValueError("portable data.path must be exactly data")
+    root = manifest_path.parent.resolve()
+    data_path = _resolve_child(root, data_relative, label="portable data.path")
+    if data_path.is_symlink() or not data_path.is_dir():
+        raise FileNotFoundError(f"portable data.path is not a directory: {data_path}")
+    if _integer(data["sampleCount"], label="portable data.sampleCount", minimum=1) != train_count:
+        raise ValueError("portable data.sampleCount does not match source.trainSampleCount")
+    image_size = data["imageSize"]
+    if (
+        not isinstance(image_size, list)
+        or len(image_size) != 2
+        or any(isinstance(item, bool) or not isinstance(item, int) or item < 16 for item in image_size)
+    ):
+        raise ValueError("portable data.imageSize must contain two integers >= 16")
+    if any(item % 16 for item in image_size):
+        raise ValueError("portable data.imageSize dimensions must both be divisible by 16")
+    entries_value = data["entries"]
+    if not isinstance(entries_value, list) or len(entries_value) != train_count:
+        raise ValueError("portable data.entries length must equal source.trainSampleCount")
+
+    entries: list[dict[str, Any]] = []
+    samples: set[str] = set()
+    expected_files: set[str] = set()
+    digest_pattern = re.compile(r"[0-9a-f]{64}")
+    for position, raw_entry in enumerate(entries_value, start=1):
+        label = f"portable data.entries[{position - 1}]"
+        if not isinstance(raw_entry, dict):
+            raise ValueError(f"{label} must be an object")
+        _strict_keys(
+            raw_entry,
+            {"index", "sample", "character", "promptIndex", "files", "sha256"},
+            label=label,
+        )
+        index = _integer(raw_entry["index"], label=f"{label}.index", minimum=1)
+        if index != position:
+            raise ValueError(f"{label}.index must be contiguous and equal {position}")
+        sample = _clean_string(raw_entry["sample"], label=f"{label}.sample")
+        if sample in samples:
+            raise ValueError(f"portable data contains duplicate sample {sample!r}")
+        samples.add(sample)
+        character = _clean_string(raw_entry["character"], label=f"{label}.character")
+        if character not in train_characters:
+            raise ValueError(f"{label}.character is not declared in source.trainCharacters")
+        prompt_index = _integer(raw_entry["promptIndex"], label=f"{label}.promptIndex")
+        if prompt_index >= prompt_count:
+            raise ValueError(f"{label}.promptIndex must be less than source.promptCount")
+        files = raw_entry["files"]
+        hashes = raw_entry["sha256"]
+        if not isinstance(files, dict) or not isinstance(hashes, dict):
+            raise ValueError(f"{label}.files and {label}.sha256 must be objects")
+        _strict_keys(files, {"input", "target", "prompt"}, label=f"{label}.files")
+        _strict_keys(hashes, {"input", "target", "prompt"}, label=f"{label}.sha256")
+        absolute: dict[str, Path] = {}
+        names: dict[str, str] = {}
+        image_sizes: dict[str, tuple[int, int]] = {}
+        for field in ("input", "target", "prompt"):
+            relative = _relative_path(files[field], label=f"{label}.files.{field}")
+            if relative.parent != PurePosixPath("."):
+                raise ValueError(f"{label}.files.{field} must be a flat child of data")
+            name = relative.name
+            if name in expected_files:
+                raise ValueError(f"portable data reuses a triplet filename: {name}")
+            expected_files.add(name)
+            names[field] = name
+            lexical_path = data_path.joinpath(*relative.parts)
+            if lexical_path.is_symlink():
+                raise ValueError(f"portable training file must not be a symbolic link: {lexical_path}")
+            path = _resolve_child(data_path, relative, label=f"{label}.files.{field}")
+            if not path.is_file():
+                raise FileNotFoundError(f"portable training file is missing: {path}")
+            declared_digest = _clean_string(hashes[field], label=f"{label}.sha256.{field}")
+            if not digest_pattern.fullmatch(declared_digest):
+                raise ValueError(f"{label}.sha256.{field} must be a lowercase SHA-256")
+            if field == "prompt":
+                _, actual_digest = _inspect_prompt(path, label=f"{label}.{field}")
+            else:
+                size, _, actual_digest = _inspect_png(path, label=f"{label}.{field}")
+                image_sizes[field] = size
+            if actual_digest != declared_digest:
+                raise ValueError(f"portable training file differs from its SHA-256: {path}")
+            absolute[field] = path
+
+        if not names["input"].endswith("_in.png") or not names["target"].endswith("_out.png"):
+            raise ValueError(f"{label} must use *_in.png and *_out.png names")
+        if not names["prompt"].endswith("_in.txt"):
+            raise ValueError(f"{label}.prompt must use a *_in.txt name")
+        input_base = names["input"][: -len("_in.png")]
+        if (
+            input_base != names["target"][: -len("_out.png")]
+            or input_base != names["prompt"][: -len("_in.txt")]
+            or not input_base.isdigit()
+            or int(input_base) != index
+        ):
+            raise ValueError(f"{label} triplet basenames must encode the same index")
+        input_size = image_sizes["input"]
+        target_size = image_sizes["target"]
+        if input_size != target_size or list(input_size) != image_size:
+            raise ValueError(f"{label} PNG size does not match portable data.imageSize")
+        entries.append(
+            {
+                "index": index,
+                "sample": sample,
+                "character": character,
+                "promptIndex": prompt_index,
+                "input": str(absolute["input"]),
+                "target": str(absolute["target"]),
+                "prompt": str(absolute["prompt"]),
+                "sourceSha256": {
+                    field: _clean_string(hashes[field], label=f"{label}.sha256.{field}")
+                    for field in ("input", "target", "prompt")
+                },
+            }
+        )
+
+    actual_files = {candidate.name for candidate in data_path.iterdir() if candidate.is_file()}
+    unexpected_children = []
+    for candidate in data_path.iterdir():
+        if candidate.is_file():
+            continue
+        if (
+            allow_managed_cache
+            and candidate.name == ".mflux_cache"
+            and not candidate.is_symlink()
+            and candidate.is_dir()
+        ):
+            continue
+        unexpected_children.append(candidate.name)
+    if actual_files != expected_files or unexpected_children:
+        raise ValueError("portable data contains missing or unexpected files")
+    root_children = {candidate.name for candidate in root.iterdir()}
+    if root_children != {PORTABLE_BUNDLE_FILENAME, "data"}:
+        raise ValueError("portable training bundle contains unexpected top-level files")
+
+    warnings: list[str] = []
+    if train_count < MIN_RECOMMENDED_SAMPLES:
+        warnings.append(
+            f"training has {train_count} samples; at least {MIN_RECOMMENDED_SAMPLES} are recommended for a quality run"
+        )
+    return {
+        "ok": True,
+        "sourceType": "portable-bundle",
+        "datasetId": dataset_id,
+        "manifest": str(manifest_path),
+        "manifestSha256": hashlib.sha256(manifest_bytes).hexdigest(),
+        "sourceManifestSha256": source_manifest_sha256,
+        "root": str(root),
+        "format": PORTABLE_BUNDLE_FORMAT,
+        "promptCount": prompt_count,
+        "modelLock": model_lock,
+        "train": {
+            "path": str(data_path),
+            "sampleCount": train_count,
+            "imageSize": image_size,
+            "entries": entries,
+            "samples": sorted(samples),
+            "characters": train_characters,
+            "files": sorted(str(data_path / name) for name in expected_files),
+        },
+        "holdout": {
+            "included": False,
+            "sampleCount": holdout_count,
+            "samples": cleaned_holdout_samples,
+            "characters": holdout_characters,
+        },
+        "warnings": warnings,
+    }
+
+
+def _load_external_model_lock_file(path: str | Path) -> dict[str, Any]:
+    lexical = Path(path).expanduser()
+    _reject_symlink_components(lexical, label="external model lock")
+    resolved = lexical.resolve()
+    if not resolved.is_file():
+        raise FileNotFoundError(f"external model lock not found: {resolved}")
+    try:
+        raw = resolved.read_bytes()
+        value = strict_json_loads(raw.decode("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"external model lock is not readable JSON: {resolved}") from exc
+    return _normalize_external_model_lock(
+        value,
+        label="external model lock",
+        included=None,
+    )
+
+
+def create_portable_training_bundle(
+    manifest: str | Path,
+    output: str | Path,
+    *,
+    model_path: str | Path | None = None,
+    model_lock_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Atomically export only validated train triplets for an MFLUX host transfer."""
+
+    if (model_path is None) == (model_lock_path is None):
+        raise ValueError("provide exactly one of model_path or model_lock_path")
+    report = validate_redraw_training_dataset(manifest)
+    if model_path is not None:
+        model_lock = fingerprint_local_mflux_model(
+            model_path,
+            require_unquantized=True,
+        )
+        model_root: Path | None = Path(model_path).expanduser().resolve()
+    else:
+        model_lock = _load_external_model_lock_file(model_lock_path)
+        model_root = None
+    output_value = Path(output).expanduser()
+    if output_value.is_symlink():
+        raise ValueError(f"portable training bundle output must not be a symbolic link: {output_value}")
+    destination = output_value.resolve()
+    source_root = Path(report["root"])
+    try:
+        destination.relative_to(source_root)
+    except ValueError:
+        pass
+    else:
+        raise ValueError("portable training bundle output must be outside the source dataset")
+    if model_root is not None and _paths_overlap(source_root, model_root):
+        raise ValueError("source dataset and local MFLUX model directory must be disjoint")
+    if model_root is not None and _paths_overlap(destination, model_root):
+        raise ValueError("portable training bundle output and local MFLUX model directory must be disjoint")
+    if destination.exists() or destination.is_symlink():
+        raise FileExistsError(
+            f"portable training bundle output already exists; overwrite is disabled: {destination}"
+        )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(
+        tempfile.mkdtemp(
+            prefix=f".{destination.name}.assetforge-staging-",
+            dir=destination.parent,
+        )
+    )
+    try:
+        data_path = staging / "data"
+        data_path.mkdir()
+        entries: list[dict[str, Any]] = []
+        for entry in report["train"]["entries"]:
+            files: dict[str, str] = {}
+            hashes: dict[str, str] = {}
+            for field in ("input", "target", "prompt"):
+                source = Path(entry[field])
+                copied = data_path / source.name
+                _copy_exclusive(source, copied)
+                if field == "prompt":
+                    copied_prompt, copied_sha256 = _inspect_prompt(
+                        copied, label=f"copied {field}"
+                    )
+                    copied_pixel_digest = None
+                else:
+                    _, copied_pixel_digest, copied_sha256 = _inspect_png(
+                        copied, label=f"copied {field}"
+                    )
+                    copied_prompt = None
+                if copied_sha256 != entry["sourceSha256"][field]:
+                    raise RuntimeError(
+                        f"source training file changed during portable bundle export: {source}"
+                    )
+                if field == "prompt":
+                    if copied_prompt != entry["promptText"]:
+                        raise RuntimeError(
+                            f"source training prompt changed during portable bundle export: {source}"
+                        )
+                else:
+                    expected_pixel_digest = entry[f"{field}PixelSha256"]
+                    if copied_pixel_digest != expected_pixel_digest:
+                        raise RuntimeError(
+                            f"source training image changed during portable bundle export: {source}"
+                        )
+                files[field] = copied.name
+                hashes[field] = copied_sha256
+            entries.append(
+                {
+                    "index": entry["index"],
+                    "sample": entry["sample"],
+                    "promptIndex": entry["promptIndex"],
+                    "character": entry["character"],
+                    "files": files,
+                    "sha256": hashes,
+                }
+            )
+        bundle_manifest = staging / PORTABLE_BUNDLE_FILENAME
+        bundle_manifest.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": PORTABLE_BUNDLE_SCHEMA_VERSION,
+                    "kind": PORTABLE_BUNDLE_KIND,
+                    "format": PORTABLE_BUNDLE_FORMAT,
+                    "source": {
+                        "datasetId": report["datasetId"],
+                        "manifestSha256": report["manifestSha256"],
+                        "trainSampleCount": report["train"]["sampleCount"],
+                        "holdoutSampleCount": report["holdout"]["sampleCount"],
+                        "promptCount": report["promptCount"],
+                        "trainCharacters": report["train"]["characters"],
+                        "holdoutCharacters": report["holdout"]["characters"],
+                    },
+                    "holdout": {
+                        "included": False,
+                        "sampleCount": report["holdout"]["sampleCount"],
+                        "samples": report["holdout"]["samples"],
+                    },
+                    "model": {
+                        **model_lock,
+                        "included": False,
+                    },
+                    "data": {
+                        "path": "data",
+                        "sampleCount": report["train"]["sampleCount"],
+                        "imageSize": report["train"]["imageSize"],
+                        "entries": entries,
+                    },
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        validate_portable_training_bundle(bundle_manifest)
+        if destination.exists() or destination.is_symlink():
+            raise FileExistsError(
+                f"portable training bundle output already exists; overwrite is disabled: {destination}"
+            )
+        os.replace(staging, destination)
+    except Exception:
+        if staging.exists():
+            shutil.rmtree(staging)
+        raise
+    result = validate_portable_training_bundle(destination)
+    return {
+        "created": True,
+        "bundlePath": str(destination),
+        "bundleManifest": result["manifest"],
+        "bundleManifestSha256": result["manifestSha256"],
+        "sourceManifestSha256": result["sourceManifestSha256"],
+        "modelFingerprintSha256": result["modelLock"]["fingerprintSha256"],
+        "trainSampleCount": result["train"]["sampleCount"],
+        "holdoutSampleCount": result["holdout"]["sampleCount"],
+        "holdoutIncluded": False,
+        "dataPath": result["train"]["path"],
+        "warnings": result["warnings"],
     }
 
 
@@ -594,6 +1289,13 @@ def _detect_adjacent_mflux_version(executable: Path | None) -> dict[str, Any]:
     return report
 
 
+def _numeric_version(value: Any) -> tuple[int, ...] | None:
+    if not isinstance(value, str):
+        return None
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:[+.-].*)?", value.strip())
+    return tuple(int(part) for part in match.groups()) if match else None
+
+
 def _nearest_existing_directory(path: Path) -> Path | None:
     candidate = path if path.exists() else path.parent
     while True:
@@ -663,10 +1365,15 @@ def _inspect_training_path(
         }
 
     raw = _clean_string(str(value), label=f"{label}_path")
-    path = Path(raw).expanduser().resolve()
+    lexical_path = Path(raw).expanduser()
+    blockers: list[str] = []
+    try:
+        _reject_symlink_components(lexical_path, label=f"{label} path")
+    except ValueError as exc:
+        blockers.append(str(exc))
+    path = lexical_path.resolve()
     exists = path.exists()
     is_directory = path.is_dir()
-    blockers: list[str] = []
     if must_exist and not exists:
         blockers.append(f"{label} path does not exist: {path}")
     if exists and not is_directory:
@@ -706,6 +1413,213 @@ def _inspect_training_path(
     }
 
 
+def mflux_cuda_training_probe(
+    executable: str | Path | None,
+    *,
+    version_report: Mapping[str, Any],
+    environ: Mapping[str, str] | None = None,
+    platform_name: str | None = None,
+) -> dict[str, Any]:
+    """On Linux, require a CUDA 13 MLX install and execute a tiny real GPU kernel."""
+
+    platform_value = sys.platform if platform_name is None else platform_name
+    base: dict[str, Any] = {
+        "required": platform_value.startswith("linux"),
+        "platform": platform_value,
+        "ready": True,
+        "blockers": [],
+        "minimumDriverMajor": MIN_CUDA13_DRIVER_MAJOR,
+        "minimumVramGiB": MIN_CUDA_TRAINING_VRAM_GIB,
+        "minimumComputeCapability": MIN_CUDA_COMPUTE_CAPABILITY,
+        "gpus": [],
+        "mlx": None,
+    }
+    if not base["required"]:
+        return base
+
+    blockers: list[str] = base["blockers"]
+    if (
+        version_report.get("detected") != MFLUX_TRAINING_VERSION
+        or version_report.get("compatible") is not True
+    ):
+        blockers.append(f"CUDA probe requires verified MFLUX {MFLUX_TRAINING_VERSION}")
+        base["ready"] = False
+        return base
+    if executable is None:
+        blockers.append("CUDA probe requires the verified mflux-train executable")
+        base["ready"] = False
+        return base
+    executable_path = Path(executable).expanduser().resolve()
+    python_path = executable_path.parent / "python"
+    if not _ready_executable(python_path):
+        blockers.append(f"CUDA probe could not find the MFLUX environment Python: {python_path}")
+        base["ready"] = False
+        return base
+
+    environment = dict(os.environ if environ is None else environ)
+    nvidia_smi = shutil.which("nvidia-smi", path=environment.get("PATH"))
+    if nvidia_smi is None:
+        blockers.append("nvidia-smi was not found on the Linux training host")
+        base["ready"] = False
+        return base
+    try:
+        query = subprocess.run(
+            [
+                str(Path(nvidia_smi).resolve()),
+                "--query-gpu=index,uuid,name,driver_version,memory.total,memory.free,compute_cap",
+                "--format=csv,noheader,nounits",
+            ],
+            shell=False,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        blockers.append(f"nvidia-smi GPU query failed: {exc}")
+        base["ready"] = False
+        return base
+    if query.returncode != 0:
+        details = (query.stderr or query.stdout or "no output").strip()[-1000:]
+        blockers.append(f"nvidia-smi GPU query failed: {details}")
+        base["ready"] = False
+        return base
+    try:
+        rows = list(csv.reader(query.stdout.splitlines(), skipinitialspace=True))
+        if not rows:
+            raise ValueError("no GPU rows")
+        for row in rows:
+            if len(row) != 7:
+                raise ValueError(f"expected 7 columns, found {len(row)}")
+            driver = row[3].strip()
+            total_memory_mib = float(row[4].strip())
+            free_memory_mib = float(row[5].strip())
+            compute_capability = float(row[6].strip())
+            driver_major = int(driver.split(".", 1)[0])
+            base["gpus"].append(
+                {
+                    "index": int(row[0].strip()),
+                    "uuid": row[1].strip(),
+                    "name": row[2].strip(),
+                    "driverVersion": driver,
+                    "driverMajor": driver_major,
+                    "memoryMiB": total_memory_mib,
+                    "memoryGiB": round(total_memory_mib / 1024, 2),
+                    "freeMemoryMiB": free_memory_mib,
+                    "freeMemoryGiB": round(free_memory_mib / 1024, 2),
+                    "computeCapability": compute_capability,
+                    "eligible": (
+                        driver_major >= MIN_CUDA13_DRIVER_MAJOR
+                        and total_memory_mib >= MIN_CUDA_TRAINING_VRAM_GIB * 1024
+                        and free_memory_mib >= MIN_CUDA_TRAINING_VRAM_GIB * 1024
+                        and compute_capability >= MIN_CUDA_COMPUTE_CAPABILITY
+                    ),
+                }
+            )
+    except (TypeError, ValueError) as exc:
+        blockers.append(f"nvidia-smi returned an unreadable GPU inventory: {exc}")
+        base["ready"] = False
+        return base
+    if len(base["gpus"]) != 1:
+        blockers.append(
+            "CUDA probe requires exactly one GPU in the training container; "
+            "isolate the intended device before running AssetForge"
+        )
+        base["ready"] = False
+        return base
+    if base["gpus"][0]["eligible"] is not True:
+        blockers.append(
+            "the isolated NVIDIA GPU does not satisfy driver >=580, compute capability >=7.5, "
+            "and at least 23 GiB total and free VRAM"
+        )
+        base["ready"] = False
+        return base
+
+    probe_script = """
+import importlib.metadata as metadata
+import json
+import mlx.core as mx
+
+payload = {
+    "mlxVersion": metadata.version("mlx"),
+    "cudaPackageVersion": metadata.version("mlx-cuda-13"),
+    "cudaAvailable": bool(mx.cuda.is_available()),
+    "gpuAvailable": bool(mx.is_available(mx.gpu)),
+}
+if not payload["cudaAvailable"] or not payload["gpuAvailable"]:
+    raise RuntimeError("MLX CUDA GPU is unavailable")
+mx.set_default_device(mx.gpu)
+left = mx.arange(16, dtype=mx.float32).reshape((4, 4))
+right = mx.ones((4, 4), dtype=mx.float32)
+result = left @ right
+mx.eval(result)
+payload["kernelSum"] = float(mx.sum(result).item())
+payload["defaultDevice"] = str(mx.default_device())
+print(json.dumps(payload, sort_keys=True))
+""".strip()
+    environment["PYTHONNOUSERSITE"] = "1"
+    try:
+        probe = subprocess.run(
+            [str(python_path), "-I", "-c", probe_script],
+            shell=False,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        blockers.append(f"MLX CUDA kernel probe failed: {exc}")
+        base["ready"] = False
+        return base
+    if probe.returncode != 0:
+        details = (probe.stderr or probe.stdout or "no output").strip()[-1000:]
+        blockers.append(f"MLX CUDA kernel probe failed: {details}")
+        base["ready"] = False
+        return base
+    try:
+        lines = [line for line in probe.stdout.splitlines() if line.strip()]
+        mlx_report = strict_json_loads(lines[-1])
+        if not isinstance(mlx_report, dict):
+            raise ValueError("probe output is not an object")
+        _strict_keys(
+            mlx_report,
+            {
+                "mlxVersion",
+                "cudaPackageVersion",
+                "cudaAvailable",
+                "gpuAvailable",
+                "kernelSum",
+                "defaultDevice",
+            },
+            label="MLX CUDA probe",
+        )
+        mlx_version = _numeric_version(mlx_report["mlxVersion"])
+        cuda_version = _numeric_version(mlx_report["cudaPackageVersion"])
+        if mlx_version is None or not ((0, 30, 3) <= mlx_version < (0, 32, 0)):
+            raise ValueError(
+                f"mlx version is {mlx_report['mlxVersion']}, expected >=0.30.3 and <0.32.0"
+            )
+        if cuda_version is None or cuda_version != mlx_version:
+            raise ValueError("mlx-cuda-13 must be installed at the exact mlx version")
+        if mlx_report["cudaAvailable"] is not True:
+            raise ValueError("mx.cuda.is_available() is false")
+        if mlx_report["gpuAvailable"] is not True:
+            raise ValueError("MLX reports no available GPU device")
+        if not math.isclose(float(mlx_report["kernelSum"]), 480.0, rel_tol=0, abs_tol=1e-4):
+            raise ValueError("GPU matrix kernel returned the wrong result")
+        if "gpu" not in str(mlx_report["defaultDevice"]).lower():
+            raise ValueError("MLX default device is not GPU")
+    except (IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        blockers.append(f"MLX CUDA probe returned an invalid attestation: {exc}")
+        base["ready"] = False
+        return base
+    base["mlx"] = mlx_report
+    base["ready"] = True
+    return base
+
+
 def mflux_training_doctor(
     *,
     model_path: str | Path,
@@ -719,7 +1633,10 @@ def mflux_training_doctor(
 ) -> dict[str, Any]:
     """Inspect local training prerequisites without importing or executing MFLUX."""
 
-    model = validate_local_mflux_model(model_path)
+    model = validate_local_mflux_model(
+        model_path,
+        require_unquantized=True,
+    )
     executable_path = discover_mflux_train_executable(executable, environ=environ)
     if physical_memory_bytes is None:
         memory_bytes = _physical_memory_bytes()
@@ -763,6 +1680,11 @@ def mflux_training_doctor(
         if cache_blockers:
             paths["cache"]["ready"] = False
     version = _detect_adjacent_mflux_version(executable_path)
+    accelerator = mflux_cuda_training_probe(
+        executable_path,
+        version_report=version,
+        environ=environ,
+    )
     blockers: list[str] = []
     warnings: list[str] = []
     if executable_path is None:
@@ -782,6 +1704,7 @@ def mflux_training_doctor(
             f"mflux-train version mismatch: detected {version['detected']}, "
             f"required {MFLUX_TRAINING_VERSION}"
         )
+    blockers.extend(accelerator["blockers"])
     if model.get("family") != MFLUX_TRAINING_MODEL:
         blockers.append("training model metadata does not identify FLUX.2 Klein base 4B")
     if memory_gib is None:
@@ -814,6 +1737,7 @@ def mflux_training_doctor(
         "model": model,
         "executable": str(executable_path) if executable_path else None,
         "mfluxVersion": version,
+        "accelerator": accelerator,
         "physicalMemoryBytes": memory_bytes,
         "physicalMemoryGiB": None if memory_gib is None else round(memory_gib, 2),
         "minimumPhysicalMemoryGiB": MIN_LOCAL_TRAINING_RAM_GIB,
@@ -826,16 +1750,25 @@ def mflux_training_doctor(
     }
 
 
-def validate_local_mflux_model(model_path: str | Path) -> dict[str, Any]:
+def validate_local_mflux_model(
+    model_path: str | Path,
+    *,
+    require_unquantized: bool = False,
+) -> dict[str, Any]:
     """Require a complete local MFLUX model without assuming Diffusers layout."""
 
+    if not isinstance(require_unquantized, bool):
+        raise ValueError("require_unquantized must be a boolean")
     raw = _clean_string(str(model_path), label="model_path")
-    path = Path(raw).expanduser().resolve()
+    lexical_path = Path(raw).expanduser()
+    _reject_symlink_components(lexical_path, label="local MFLUX model directory")
+    path = lexical_path.resolve()
     if not path.is_dir():
         raise FileNotFoundError(f"local MFLUX model directory not found: {path}")
     configs: list[Path] = []
     weights: list[Path] = []
     indexes: list[Path] = []
+    quantization_levels: set[int] = set()
     for candidate in path.rglob("*"):
         try:
             relative = candidate.relative_to(path)
@@ -843,6 +1776,8 @@ def validate_local_mflux_model(model_path: str | Path) -> dict[str, Any]:
             continue
         if ".cache" in relative.parts:
             continue
+        if candidate.is_symlink():
+            raise ValueError(f"local MFLUX model must not contain symbolic links: {candidate}")
         if candidate.name.endswith(".incomplete"):
             raise ValueError(f"local MFLUX model contains an incomplete file: {candidate}")
         if not candidate.is_file():
@@ -852,12 +1787,38 @@ def validate_local_mflux_model(model_path: str | Path) -> dict[str, Any]:
         if candidate.suffix.lower() in _MODEL_WEIGHT_SUFFIXES:
             if candidate.stat().st_size <= 0:
                 raise ValueError(f"local MFLUX model contains an empty weight file: {candidate}")
-            read_safetensors_header(candidate)
+            header = read_safetensors_header(candidate)
+            metadata = header.get("__metadata__")
+            if isinstance(metadata, Mapping):
+                raw_level = metadata.get("quantization_level")
+                if raw_level not in (None, "None", "null", ""):
+                    try:
+                        level = int(raw_level)
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError(
+                            f"local MFLUX model has invalid quantization metadata: {candidate}"
+                        ) from exc
+                    if level <= 0:
+                        raise ValueError(
+                            f"local MFLUX model has invalid quantization metadata: {candidate}"
+                        )
+                    quantization_levels.add(level)
             weights.append(candidate)
         if candidate.name.endswith(".safetensors.index.json"):
             indexes.append(candidate)
     if not weights:
         raise ValueError(f"local MFLUX model has no non-empty weight files: {path}")
+    if len(quantization_levels) > 1:
+        raise ValueError(
+            "local MFLUX model has inconsistent quantization levels: "
+            + ", ".join(str(level) for level in sorted(quantization_levels))
+        )
+    quantization_level = next(iter(quantization_levels), None)
+    if require_unquantized and quantization_level is not None:
+        raise ValueError(
+            "this validation call requires unquantized base weights; "
+            f"the supplied model is stored at {quantization_level}-bit"
+        )
 
     indexed_shards: set[Path] = set()
     for index in indexes:
@@ -879,13 +1840,34 @@ def validate_local_mflux_model(model_path: str | Path) -> dict[str, Any]:
                 raise ValueError(f"MFLUX weight index references a missing shard: {shard}")
             indexed_shards.add(shard)
 
+    tokenizer_root = path / "tokenizer"
+    required_tokenizer_files = (
+        tokenizer_root / "tokenizer.json",
+        tokenizer_root / "tokenizer_config.json",
+    )
+    for tokenizer_file in required_tokenizer_files:
+        if tokenizer_file.is_symlink() or not tokenizer_file.is_file():
+            raise ValueError(
+                f"local MFLUX model is missing a required tokenizer file: {tokenizer_file}"
+            )
+        try:
+            tokenizer_value = strict_json_loads(tokenizer_file.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                f"local MFLUX model has an unreadable tokenizer file: {tokenizer_file}"
+            ) from exc
+        if not isinstance(tokenizer_value, dict):
+            raise ValueError(
+                f"local MFLUX model tokenizer file must contain a JSON object: {tokenizer_file}"
+            )
+
     converted_components = ("text_encoder", "transformer", "vae")
     converted_layout = all(
         (path / component).is_dir()
         and any(weight.parent == path / component for weight in weights)
         and any(index.parent == path / component for index in indexes)
         for component in converted_components
-    ) and (path / "tokenizer" / "tokenizer.json").is_file()
+    )
     diffusers_layout = (path / "model_index.json").is_file() and all(
         (path / component / "config.json").is_file()
         and any(weight.parent == path / component for weight in weights)
@@ -918,10 +1900,71 @@ def validate_local_mflux_model(model_path: str | Path) -> dict[str, Any]:
         "weightFileCount": len(weights),
         "indexCount": len(indexes),
         "indexedShardCount": len(indexed_shards),
+        "quantizationLevel": quantization_level,
     }
 
 
-def _validate_prepared_subset(path: Path, selected: list[dict[str, Any]]) -> None:
+def fingerprint_local_mflux_model(
+    model_path: str | Path,
+    *,
+    require_unquantized: bool = False,
+) -> dict[str, Any]:
+    """Hash every non-cache regular model file for relocation-safe identity locking."""
+
+    validation = validate_local_mflux_model(
+        model_path,
+        require_unquantized=require_unquantized,
+    )
+    root = Path(validation["path"])
+    files: list[dict[str, Any]] = []
+    total_bytes = 0
+    for candidate in sorted(root.rglob("*")):
+        relative = candidate.relative_to(root)
+        if ".cache" in relative.parts:
+            continue
+        if candidate.is_symlink():
+            raise ValueError(f"local MFLUX model must not contain symbolic links: {candidate}")
+        if candidate.is_dir():
+            continue
+        if not candidate.is_file():
+            raise ValueError(f"local MFLUX model contains a non-regular file: {candidate}")
+        size = candidate.stat().st_size
+        if size <= 0:
+            raise ValueError(f"local MFLUX model contains an empty file: {candidate}")
+        total_bytes += size
+        files.append(
+            {
+                "path": relative.as_posix(),
+                "bytes": size,
+                "sha256": _sha256(candidate),
+            }
+        )
+    if not files:
+        raise ValueError(f"local MFLUX model has no fingerprintable files: {root}")
+    fingerprint = hashlib.sha256(
+        json.dumps(
+            files,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        "family": validation["family"],
+        "layout": validation["layout"],
+        "fileCount": len(files),
+        "totalBytes": total_bytes,
+        "fingerprintSha256": fingerprint,
+        "files": files,
+    }
+
+
+def _validate_prepared_subset(
+    path: Path,
+    selected: list[dict[str, Any]],
+    *,
+    allow_managed_cache: bool = False,
+) -> None:
     if path.is_symlink() or not path.is_dir():
         raise FileNotFoundError(f"prepared training data not found: {path}")
     expected_names = {"assetforge-training-subset.json"}
@@ -932,11 +1975,129 @@ def _validate_prepared_subset(path: Path, selected: list[dict[str, Any]]) -> Non
             destination = path / source.name
             if destination.is_symlink() or not destination.is_file():
                 raise FileNotFoundError(f"prepared training triplet is missing: {destination}")
-            if _sha256(destination) != _sha256(source):
+            source_hashes = entry.get("sourceSha256")
+            if not isinstance(source_hashes, Mapping) or not isinstance(
+                source_hashes.get(field), str
+            ):
+                raise ValueError("selected training entry has no approved source SHA-256")
+            if _sha256(destination) != source_hashes[field]:
                 raise ValueError(f"prepared training triplet differs from its train source: {destination}")
     actual_names = {candidate.name for candidate in path.iterdir() if candidate.is_file()}
-    if actual_names != expected_names:
+    unexpected_children = []
+    for candidate in path.iterdir():
+        if candidate.is_file():
+            continue
+        if (
+            allow_managed_cache
+            and candidate.name == ".mflux_cache"
+            and not candidate.is_symlink()
+            and candidate.is_dir()
+        ):
+            continue
+        unexpected_children.append(candidate.name)
+    if actual_names != expected_names or unexpected_children:
         raise ValueError("prepared training data contains missing or unexpected files")
+
+
+def _selected_files_fingerprint(entries: list[dict[str, Any]]) -> str:
+    locked: list[dict[str, Any]] = []
+    for entry in entries:
+        hashes = entry.get("sourceSha256")
+        if not isinstance(hashes, Mapping):
+            raise ValueError("selected training entry has no approved source SHA-256")
+        normalized: dict[str, str] = {}
+        for field in ("input", "target", "prompt"):
+            digest = hashes.get(field)
+            if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise ValueError("selected training entry has an invalid source SHA-256")
+            normalized[field] = digest
+        locked.append(
+            {
+                "index": entry["index"],
+                "sample": entry["sample"],
+                "sha256": normalized,
+            }
+        )
+    return hashlib.sha256(
+        json.dumps(locked, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+
+
+def _revalidate_plan_dataset(plan: Mapping[str, Any]) -> None:
+    """Fail closed if auto-discovered training data changed after plan approval."""
+
+    manifest = plan.get("manifest")
+    dataset = plan.get("dataset")
+    config = plan.get("config")
+    if not isinstance(manifest, str) or not isinstance(dataset, Mapping) or not isinstance(config, Mapping):
+        raise RuntimeError("training plan is missing its dataset integrity contract")
+    source_type = dataset.get("sourceType")
+    try:
+        if source_type == "redraw-dataset":
+            fresh = validate_redraw_training_dataset(manifest, allow_managed_cache=True)
+        elif source_type == "portable-bundle":
+            fresh = validate_portable_training_bundle(manifest, allow_managed_cache=True)
+        else:
+            raise ValueError(f"unsupported training dataset sourceType: {source_type!r}")
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        raise RuntimeError(f"training dataset changed after plan approval: {exc}") from exc
+
+    comparisons = {
+        "manifestSha256": fresh["manifestSha256"],
+        "sourceManifestSha256": fresh.get("sourceManifestSha256"),
+        "sourceTrainCount": fresh["train"]["sampleCount"],
+        "sourceHoldoutCount": fresh["holdout"]["sampleCount"],
+    }
+    for field, actual in comparisons.items():
+        if dataset.get(field) != actual:
+            raise RuntimeError(f"training dataset changed after plan approval: {field} differs")
+
+    sample_limit = dataset.get("sampleLimit")
+    selected = _selected_entries(fresh, sample_limit)
+    expected_samples = [entry["sample"] for entry in selected]
+    if dataset.get("samples") != expected_samples or dataset.get("selectedCount") != len(selected):
+        raise RuntimeError("training dataset changed after plan approval: selected samples differ")
+    if dataset.get("selectedFilesFingerprintSha256") != _selected_files_fingerprint(selected):
+        raise RuntimeError("training dataset changed after plan approval: selected files differ")
+    data_value = config.get("data")
+    if not isinstance(data_value, str):
+        raise RuntimeError("training plan has no validated data path")
+    data_path = Path(data_value).expanduser().resolve()
+    if sample_limit is None:
+        if data_path != Path(fresh["train"]["path"]).resolve():
+            raise RuntimeError("training dataset changed after plan approval: data path differs")
+    else:
+        try:
+            _validate_prepared_subset(data_path, selected, allow_managed_cache=True)
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            raise RuntimeError(f"training dataset changed after plan approval: {exc}") from exc
+
+
+def _external_model_lock(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: item for key, item in value.items() if key != "included"}
+
+
+def _revalidate_plan_model(plan: Mapping[str, Any]) -> None:
+    expected = plan.get("modelLock")
+    config = plan.get("config")
+    if expected is None:
+        return
+    if not isinstance(expected, Mapping) or not isinstance(config, Mapping):
+        raise RuntimeError("training plan has an invalid model fingerprint contract")
+    model_path = config.get("model_path")
+    if not isinstance(model_path, str):
+        raise RuntimeError("training plan has no model path for fingerprint verification")
+    try:
+        actual = fingerprint_local_mflux_model(
+            model_path,
+            require_unquantized=True,
+        )
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        raise RuntimeError(f"training model changed after plan approval: {exc}") from exc
+    if actual != _external_model_lock(expected):
+        raise RuntimeError("training model changed after plan approval: fingerprint differs")
 
 
 def _lora_targets(rank: int) -> list[dict[str, Any]]:
@@ -951,8 +2112,10 @@ def _lora_targets(rank: int) -> list[dict[str, Any]]:
 
 
 def build_mflux_training_plan(
-    manifest: str | Path,
+    manifest: str | Path | None = None,
     *,
+    portable_bundle: str | Path | None = None,
+    expected_bundle_sha256: str | None = None,
     model_path: str | Path,
     config_output: str | Path,
     prepared_data_path: str | Path | None = None,
@@ -960,14 +2123,15 @@ def build_mflux_training_plan(
     checkpoint_output: str | Path | None = None,
     executable: str | Path | None = None,
     environ: Mapping[str, str] | None = None,
-    low_ram: bool = True,
+    low_ram: bool = False,
     max_resolution: int = 576,
-    epochs: int = 100,
+    epochs: int | None = None,
+    target_updates: int | None = None,
     batch_size: int = 1,
     learning_rate: float = 1e-4,
-    checkpoint_frequency: int = 25,
-    plot_frequency: int = 1,
-    generate_image_frequency: int = 20,
+    checkpoint_frequency: int = 250,
+    plot_frequency: int = 25,
+    generate_image_frequency: int = 250,
     lora_rank: int = 16,
     seed: int = 42,
     physical_memory_bytes: int | None = None,
@@ -976,15 +2140,46 @@ def build_mflux_training_plan(
 ) -> dict[str, Any]:
     """Create a deterministic MFLUX 0.18.0 FLUX.2 edit-LoRA config plan."""
 
-    report = validate_redraw_training_dataset(manifest)
+    if (manifest is None) == (portable_bundle is None):
+        raise ValueError("provide exactly one of manifest or portable_bundle")
+    report = (
+        validate_redraw_training_dataset(manifest)
+        if manifest is not None
+        else validate_portable_training_bundle(portable_bundle)
+    )
+    if portable_bundle is not None:
+        expected_bundle_sha256 = _clean_string(
+            expected_bundle_sha256,
+            label="expected_bundle_sha256",
+        )
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_bundle_sha256):
+            raise ValueError("expected_bundle_sha256 must be a lowercase SHA-256")
+        if report["manifestSha256"] != expected_bundle_sha256:
+            raise ValueError("portable bundle manifest does not match expected_bundle_sha256")
+    elif expected_bundle_sha256 is not None:
+        raise ValueError("expected_bundle_sha256 is only accepted with portable_bundle")
     selected = _selected_entries(report, sample_limit)
     if not isinstance(low_ram, bool):
         raise ValueError("low_ram must be a boolean")
     if not isinstance(allow_existing_config, bool):
         raise ValueError("allow_existing_config must be a boolean")
     max_resolution = _integer(max_resolution, label="max_resolution", minimum=16)
-    epochs = _integer(epochs, label="epochs", minimum=1)
     batch_size = _integer(batch_size, label="batch_size", minimum=1)
+    if epochs is not None and target_updates is not None:
+        raise ValueError("epochs and target_updates are mutually exclusive")
+    updates_per_epoch = math.ceil(len(selected) / batch_size)
+    if epochs is None:
+        requested_target_updates = _integer(
+            DEFAULT_TARGET_UPDATES if target_updates is None else target_updates,
+            label="target_updates",
+            minimum=1,
+        )
+        epochs = math.ceil(requested_target_updates / updates_per_epoch)
+        schedule_mode = "target-updates"
+    else:
+        epochs = _integer(epochs, label="epochs", minimum=1)
+        requested_target_updates = None
+        schedule_mode = "epochs"
     checkpoint_frequency = _integer(checkpoint_frequency, label="checkpoint_frequency", minimum=1)
     plot_frequency = _integer(plot_frequency, label="plot_frequency", minimum=1)
     generate_image_frequency = _integer(
@@ -993,7 +2188,7 @@ def build_mflux_training_plan(
     lora_rank = _integer(lora_rank, label="lora_rank", minimum=1)
     seed = _integer(seed, label="seed")
     learning_rate_value = _positive_number(learning_rate, label="learning_rate")
-    total_updates = epochs * math.ceil(len(selected) / batch_size)
+    total_updates = epochs * updates_per_epoch
     if checkpoint_frequency > total_updates:
         raise ValueError(
             f"checkpoint_frequency={checkpoint_frequency} exceeds the planned "
@@ -1012,12 +2207,15 @@ def build_mflux_training_plan(
             raise ValueError("prepared_data_path is only accepted when sample_limit selects a subset")
         data_path = Path(report["train"]["path"])
 
-    config_path = Path(config_output).expanduser().resolve()
-    checkpoint_path = (
-        Path(checkpoint_output).expanduser().resolve()
-        if checkpoint_output is not None
-        else config_path.parent / "checkpoints"
-    )
+    config_lexical = Path(config_output).expanduser()
+    _reject_symlink_components(config_lexical, label="config_output")
+    config_path = config_lexical.resolve()
+    if checkpoint_output is not None:
+        checkpoint_lexical = Path(checkpoint_output).expanduser()
+        _reject_symlink_components(checkpoint_lexical, label="checkpoint_output")
+        checkpoint_path = checkpoint_lexical.resolve()
+    else:
+        checkpoint_path = config_path.parent / "checkpoints"
     source_root = Path(report["root"])
     for candidate, label in ((config_path, "config_output"), (checkpoint_path, "checkpoint_output")):
         try:
@@ -1039,8 +2237,36 @@ def build_mflux_training_plan(
         minimum_free_disk_gib=minimum_free_disk_gib,
     )
     model = doctor["model"]
+    model_root = Path(model["path"])
+    disjoint_pairs = (
+        (source_root, "source dataset", model_root, "local MFLUX model directory"),
+        (data_path, "training data", model_root, "local MFLUX model directory"),
+        (config_path, "config_output", model_root, "local MFLUX model directory"),
+        (checkpoint_path, "checkpoint_output", model_root, "local MFLUX model directory"),
+        (config_path, "config_output", data_path, "training data"),
+        (checkpoint_path, "checkpoint_output", data_path, "training data"),
+        (config_path, "config_output", checkpoint_path, "checkpoint_output"),
+    )
+    for left, left_label, right, right_label in disjoint_pairs:
+        if _paths_overlap(left, right):
+            raise ValueError(f"{left_label} and {right_label} must be disjoint")
+    portable_model_lock = report.get("modelLock")
+    actual_model_lock = fingerprint_local_mflux_model(
+        model["path"],
+        require_unquantized=True,
+    )
+    if isinstance(portable_model_lock, Mapping):
+        expected_model_lock: Mapping[str, Any] = portable_model_lock
+        model_lock_verified = actual_model_lock == _external_model_lock(portable_model_lock)
+    else:
+        expected_model_lock = actual_model_lock
+        model_lock_verified = True
 
     width, height = report["train"]["imageSize"]
+    if width % 16 or height % 16:
+        raise ValueError(
+            f"training board size {width}x{height} must use dimensions divisible by 16"
+        )
     area = width * height
     max_area = max_resolution * max_resolution
     if area > max_area:
@@ -1057,7 +2283,7 @@ def build_mflux_training_plan(
         "seed": seed,
         "steps": 40,
         "guidance": 1.0,
-        "quantize": 4,
+        "quantize": None,
         "max_resolution": max_resolution,
         "low_ram": low_ram,
         "training_loop": {
@@ -1081,6 +2307,13 @@ def build_mflux_training_plan(
     }
     executable_path = doctor["executable"]
     blockers: list[str] = list(doctor["blockers"])
+    if low_ram:
+        blockers.append(
+            "MFLUX 0.18.0 low_ram mode is disabled for managed execution because its "
+            "training cache performs recursive deletion; use low_ram=false"
+        )
+    if model_lock_verified is False:
+        blockers.append("training model fingerprint differs from the portable bundle lock")
     config_reused = False
     if config_path.exists() or config_path.is_symlink():
         if allow_existing_config and config_path.is_file() and not config_path.is_symlink():
@@ -1112,14 +2345,40 @@ def build_mflux_training_plan(
         "warnings": warnings,
         "manifest": report["manifest"],
         "dataset": {
+            "sourceType": report["sourceType"],
+            "manifestSha256": report["manifestSha256"],
+            "expectedBundleSha256": expected_bundle_sha256,
+            "sourceManifestSha256": report.get("sourceManifestSha256"),
             "sourceTrainCount": report["train"]["sampleCount"],
+            "sourceHoldoutCount": report["holdout"]["sampleCount"],
+            "sourceHoldoutCharacters": report["holdout"].get("characters"),
+            "modelFingerprintSha256": (
+                expected_model_lock.get("fingerprintSha256")
+                if isinstance(expected_model_lock, Mapping)
+                else None
+            ),
             "selectedCount": len(selected),
             "sampleLimit": sample_limit,
             "dataPath": str(data_path),
             "holdoutIncluded": False,
             "samples": [entry["sample"] for entry in selected],
+            "selectedFilesFingerprintSha256": _selected_files_fingerprint(selected),
+        },
+        "schedule": {
+            "mode": schedule_mode,
+            "requestedTargetUpdates": requested_target_updates,
+            "updatesPerEpoch": updates_per_epoch,
+            "numEpochs": epochs,
+            "plannedUpdates": total_updates,
+            "targetOvershoot": (
+                total_updates - requested_target_updates
+                if requested_target_updates is not None
+                else None
+            ),
         },
         "model": model,
+        "modelLock": expected_model_lock,
+        "modelFingerprintVerified": model_lock_verified,
         "doctor": doctor,
         "config": config,
         "configOutput": str(config_path),
@@ -1145,6 +2404,7 @@ def write_mflux_training_config(plan: Mapping[str, Any]) -> Path:
     if not isinstance(config, dict) or not isinstance(output, str):
         raise ValueError("invalid MFLUX training plan")
     path = Path(output)
+    _reject_symlink_components(path, label="training config output")
     if path.exists() or path.is_symlink():
         raise FileExistsError(f"config output already exists; overwrite is disabled: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1154,10 +2414,76 @@ def write_mflux_training_config(plan: Mapping[str, Any]) -> Path:
     return path.resolve()
 
 
+def _revalidate_execution_paths(
+    plan: Mapping[str, Any],
+    config_path: Path,
+    config: Mapping[str, Any],
+) -> dict[str, Path]:
+    """Re-resolve every approved path and repeat overlap checks immediately before execution."""
+
+    dataset = plan.get("dataset")
+    model = plan.get("model")
+    manifest = plan.get("manifest")
+    checkpoint = config.get("checkpoint")
+    if (
+        not isinstance(dataset, Mapping)
+        or not isinstance(model, Mapping)
+        or not isinstance(manifest, str)
+        or not isinstance(checkpoint, Mapping)
+    ):
+        raise RuntimeError("refusing to execute a training plan with an invalid path contract")
+
+    expected_values = {
+        "config": plan.get("configOutput"),
+        "model": model.get("path"),
+        "data": dataset.get("dataPath"),
+        "checkpoint": checkpoint.get("output_path"),
+        "source dataset": str(Path(manifest).expanduser().parent),
+    }
+    paths: dict[str, Path] = {}
+    for label, raw in expected_values.items():
+        if not isinstance(raw, str):
+            raise RuntimeError(f"refusing to execute without an approved {label} path")
+        lexical = Path(raw).expanduser()
+        try:
+            _reject_symlink_components(lexical, label=f"approved {label} path")
+        except ValueError as exc:
+            raise RuntimeError(f"refusing to execute with an unsafe path: {exc}") from exc
+        paths[label] = lexical.resolve()
+
+    if paths["config"] != config_path.resolve():
+        raise RuntimeError("written training config path differs from the approved plan")
+    model_value = config.get("model_path")
+    data_value = config.get("data")
+    if not isinstance(model_value, str) or Path(model_value).expanduser().resolve() != paths["model"]:
+        raise RuntimeError("training model path differs from the approved plan")
+    if not isinstance(data_value, str) or Path(data_value).expanduser().resolve() != paths["data"]:
+        raise RuntimeError("training data path differs from the approved plan")
+
+    disjoint_pairs = (
+        ("source dataset", "model"),
+        ("source dataset", "config"),
+        ("source dataset", "checkpoint"),
+        ("data", "model"),
+        ("config", "model"),
+        ("checkpoint", "model"),
+        ("config", "data"),
+        ("checkpoint", "data"),
+        ("config", "checkpoint"),
+    )
+    for left, right in disjoint_pairs:
+        if _paths_overlap(paths[left], paths[right]):
+            raise RuntimeError(
+                f"refusing to execute because approved {left} and {right} paths overlap"
+            )
+    return paths
+
+
 def compile_mflux_train_command(
     plan: Mapping[str, Any],
     *,
     execute: bool = False,
+    environ: Mapping[str, str] | None = None,
 ) -> list[str]:
     """Compile dry-run argv, or training argv after a fresh host-safety audit."""
 
@@ -1171,6 +2497,10 @@ def compile_mflux_train_command(
     if not isinstance(config_output, str) or not isinstance(config, dict):
         raise ValueError("invalid MFLUX training plan")
     config_path = Path(config_output)
+    try:
+        _reject_symlink_components(config_path, label="training config")
+    except ValueError as exc:
+        raise RuntimeError(f"refusing to compile with an unsafe config path: {exc}") from exc
     if not config_path.is_file():
         raise RuntimeError("write and verify the MFLUX training config before command compilation")
     try:
@@ -1189,6 +2519,7 @@ def compile_mflux_train_command(
 
     if plan.get("ready") is not True:
         raise RuntimeError("refusing to compile a training command from a plan that is not ready")
+    live_paths = _revalidate_execution_paths(plan, config_path, config)
     doctor = plan.get("doctor")
     if not isinstance(doctor, Mapping):
         raise RuntimeError("refusing to compile a training command without a doctor report")
@@ -1201,12 +2532,14 @@ def compile_mflux_train_command(
     data_path = config.get("data")
     if not isinstance(model_path, str) or not isinstance(data_path, str):
         raise ValueError("invalid MFLUX model or data path in config")
-    checkpoint_path = Path(checkpoint_conf["output_path"]).expanduser()
+    checkpoint_path = live_paths["checkpoint"]
     if checkpoint_path.exists() or checkpoint_path.is_symlink():
         raise RuntimeError(
             f"refusing to compile a training command because checkpoint output already exists: {checkpoint_path}"
         )
-    cache_path = Path(data_path).expanduser() / ".mflux_cache" / "training"
+    model_path = str(live_paths["model"])
+    data_path = str(live_paths["data"])
+    cache_path = live_paths["data"] / ".mflux_cache" / "training"
     minimum_free_value = doctor.get("minimumFreeDiskGiB", MIN_LOCAL_TRAINING_FREE_DISK_GIB)
     try:
         minimum_free_gib = max(float(minimum_free_value), MIN_LOCAL_TRAINING_FREE_DISK_GIB)
@@ -1216,6 +2549,7 @@ def compile_mflux_train_command(
     fresh_doctor = mflux_training_doctor(
         model_path=model_path,
         executable=executable,
+        environ=environ,
         data_path=data_path,
         checkpoint_path=checkpoint_path,
         cache_path=cache_path,
@@ -1229,6 +2563,8 @@ def compile_mflux_train_command(
     if not fresh_doctor["localTrainingReady"]:
         details = "; ".join(fresh_doctor["blockers"])
         raise RuntimeError(f"refusing to compile a training command on an unsafe host: {details}")
+    _revalidate_plan_model(plan)
+    _revalidate_plan_dataset(plan)
     return command
 
 
@@ -1242,15 +2578,15 @@ def run_mflux_training_plan(
 
     if execute is not True:
         raise RuntimeError("actual MFLUX training requires execute=True")
+    environment = dict(os.environ if environ is None else environ)
+    environment["HF_HUB_OFFLINE"] = "1"
+    environment["TRANSFORMERS_OFFLINE"] = "1"
     # Perform the full execution preflight before invoking even MFLUX's
     # dry-run mode. A dry-run is still an external executable and may touch
     # its dataset cache, so an unverified binary or unsafe cache must never be
     # allowed to run first.
-    verified_command = compile_mflux_train_command(plan, execute=True)
+    verified_command = compile_mflux_train_command(plan, execute=True, environ=environment)
     dry_run_command = verified_command + ["--dry-run"]
-    environment = dict(os.environ if environ is None else environ)
-    environment["HF_HUB_OFFLINE"] = "1"
-    environment["TRANSFORMERS_OFFLINE"] = "1"
     dry_run = subprocess.run(
         dry_run_command,
         shell=False,
@@ -1268,7 +2604,7 @@ def run_mflux_training_plan(
     # Re-audit the live host after the parser check, immediately before the
     # expensive process starts. This also rejects a newly-created checkpoint
     # destination instead of resuming or overwriting it implicitly.
-    command = compile_mflux_train_command(plan, execute=True)
+    command = compile_mflux_train_command(plan, execute=True, environ=environment)
     result = subprocess.run(
         command,
         shell=False,
@@ -1320,11 +2656,15 @@ __all__ = [
     "MIN_LOCAL_TRAINING_RAM_GIB",
     "build_mflux_training_plan",
     "compile_mflux_train_command",
+    "create_portable_training_bundle",
     "discover_mflux_train_executable",
+    "fingerprint_local_mflux_model",
+    "mflux_cuda_training_probe",
     "mflux_training_doctor",
     "prepare_training_data",
     "run_mflux_training_plan",
     "validate_local_mflux_model",
+    "validate_portable_training_bundle",
     "validate_redraw_training_dataset",
     "write_mflux_training_config",
 ]

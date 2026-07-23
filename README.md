@@ -131,7 +131,7 @@ The training path is separate from local inference. Validate the exact MFLUX ver
 
 ```bash
 assetforge mflux-train-doctor \
-  --model-path ~/.local/share/assetforge/models/FLUX2-klein-base-4B-mlx-4bit \
+  --model-path ~/.local/share/assetforge/models/FLUX2-klein-base-4B-unquantized \
   --data-path build/redraw-dataset/mflux/train \
   --checkpoint-path build/training/run
 ```
@@ -141,18 +141,22 @@ Build an inspectable config for the complete train split. `--write-config` write
 ```bash
 assetforge mflux-train-plan \
   --manifest build/redraw-dataset/dataset.json \
-  --model-path ~/.local/share/assetforge/models/FLUX2-klein-base-4B-mlx-4bit \
+  --model-path ~/.local/share/assetforge/models/FLUX2-klein-base-4B-unquantized \
   --config-output build/training/assetforge-redraw.json \
   --checkpoint-output build/training/run \
   --write-config
 ```
 
-After inspecting that exact config, repeat the same command with `--execute`. AssetForge re-derives the plan, accepts only an exactly equivalent parsed config, and completes the full host, version, and managed-cache audit before invoking even MFLUX's dry-run. It audits again immediately before launching training with offline model flags. A newly created or changed checkpoint path, a config mismatch, MFLUX other than 0.18.0, less than 24 GiB RAM, less than 20 GiB free disk, or a symlink that could redirect MFLUX's disposable cache outside the training data blocks execution:
+By default AssetForge derives a whole-epoch schedule that reaches at least 1,500 optimizer updates, rather than applying a fixed epoch count to every dataset size. For 32 train boards this is 47 epochs and 1,504 updates. Checkpoints and matching preview renders default to every 250 updates so the first diagnostic run can compare intermediate adapters without creating hundreds of archives. Use `--target-updates` to change that budget, or the mutually exclusive `--epochs` only when intentionally reproducing an exact epoch schedule.
+
+Training intentionally follows MFLUX 0.18.0's FLUX.2 example with unquantized weights, `quantize: null`, and `low_ram: false`. Pre-quantized 4-bit models are inference-only: the supported MLX CUDA package cannot safely attest the quantized backward path. AssetForge also blocks MFLUX's recursive training `low_ram` disk cache from managed execution.
+
+After inspecting that exact config, repeat the same command with `--execute`. AssetForge re-derives the plan, accepts only an exactly equivalent parsed config, and completes the full host, version, data, model, and output-path audit before invoking even MFLUX's dry-run. It audits again immediately before launching training with offline model flags. A newly created or changed checkpoint path, a config mismatch, a quantized model, MFLUX other than 0.18.0, less than 24 GiB RAM, or less than 20 GiB free disk blocks execution:
 
 ```bash
 assetforge mflux-train-plan \
   --manifest build/redraw-dataset/dataset.json \
-  --model-path ~/.local/share/assetforge/models/FLUX2-klein-base-4B-mlx-4bit \
+  --model-path ~/.local/share/assetforge/models/FLUX2-klein-base-4B-unquantized \
   --config-output build/training/assetforge-redraw.json \
   --checkpoint-output build/training/run \
   --write-config \
@@ -168,13 +172,59 @@ assetforge mflux-train-prepare \
   --sample-limit 2
 ```
 
-The generated config contains host-specific absolute paths, so regenerate it on the compatible training host after copying the validated dataset and model. Do not pass it directly to an unrelated CUDA/Diffusers trainer. Keep the holdout directory out of training, and treat fewer than 50 paired boards as a diagnostic run rather than a quality run.
+For a Linux/NVIDIA MFLUX host, export a byte-pinned portable-v2 bundle. It contains only the validated train triplets and its transfer manifest; validation targets are deliberately excluded:
+
+```bash
+assetforge mflux-train-bundle \
+  --manifest build/redraw-dataset/dataset.json \
+  --model-lock docs/model-locks/flux2-klein-base-4b-a3b4f484.json \
+  --output build/training/assetforge-redraw-portable
+```
+
+The included lock targets `black-forest-labs/FLUX.2-klein-base-4B` at revision `a3b4f4849157f664bdbc776fd7453c2783562f4d`. `--model-lock` lets the 15.98 GB base model stay remote while pinning every expected file byte. If that exact unquantized model already exists locally, use the mutually exclusive `--model-path` instead. Copy the small bundle and a pinned AssetForge commit to the remote host. MFLUX 0.18.0 installs MLX's CUDA 13 backend on Linux. AssetForge fails closed unless the container exposes exactly one GPU with driver 580+, compute capability 7.5+, at least 23 GiB total and currently free VRAM, matching `mlx` and `mlx-cuda-13` versions in MFLUX's `>=0.30.3,<0.32.0` range, and a successful real float MLX GPU kernel. CUDA compatibility-package exceptions are intentionally not accepted. Install both tools, download the exact locked unquantized revision, and regenerate all absolute paths on that host:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+uv tool install --python 3.13 'mflux==0.18.0'
+uv tool install --python 3.13 /workspace/assetforge
+assetforge --version
+mflux-train --help >/dev/null
+
+MODEL_LOCK=/workspace/assetforge/docs/model-locks/flux2-klein-base-4b-a3b4f484.json
+MFLUX_EXE="$(readlink -f "$(command -v mflux-train)")"
+MFLUX_PY="$(dirname "$MFLUX_EXE")/python"
+"$MFLUX_PY" - "$MODEL_LOCK" <<'PY'
+import json
+import sys
+from huggingface_hub import snapshot_download
+
+lock = json.load(open(sys.argv[1], encoding="utf-8"))
+snapshot_download(
+    repo_id="black-forest-labs/FLUX.2-klein-base-4B",
+    revision="a3b4f4849157f664bdbc776fd7453c2783562f4d",
+    local_dir="/workspace/FLUX2-klein-base-4B-unquantized",
+    allow_patterns=[entry["path"] for entry in lock["files"]],
+)
+PY
+
+assetforge mflux-train-plan \
+  --bundle /workspace/assetforge-redraw-portable \
+  --expected-bundle-sha256 <hash-printed-by-mflux-train-bundle> \
+  --model-path /workspace/FLUX2-klein-base-4B-unquantized \
+  --config-output /workspace/training/assetforge-redraw.json \
+  --checkpoint-output /workspace/training/run \
+  --write-config
+```
+
+Inspect the reported bundle hash, model fingerprint, selected-file fingerprint, `schedule`, MFLUX version, memory, disk, and accelerator checks before repeating with `--execute`. The generated config contains host-specific absolute paths, so never reuse the Mac config on Linux or pass it to an unrelated CUDA/Diffusers trainer. Treat fewer than 50 paired boards as a diagnostic run rather than a quality run.
+
+For the complete paid-host sequence—preflight before upload, pinned installs, `tmux` logging, checkpoint extraction, verified result download, local held-out QC, and Pod termination—follow [the RunPod A40 runbook](docs/runpod-a40-training.md). See [MFLUX 0.18.0's NVIDIA install](https://github.com/filipstrand/mflux/blob/v.0.18.0/README.md) and [MLX's CUDA requirements](https://ml-explore.github.io/mlx/build/html/install.html) for the live platform prerequisites.
 
 Extract only the LoRA named by a completed MFLUX checkpoint manifest. ZIP traversal, symlinks, corrupt safetensors, missing LoRA tensor pairs, and mismatched MFLUX/model metadata are rejected:
 
 ```bash
 assetforge mflux-train-extract \
-  --checkpoint build/training/run/checkpoints/0003200_checkpoint.zip \
+  --checkpoint /workspace/training/run/checkpoints/0001504_checkpoint.zip \
   --output models/assetforge-redraw.safetensors
 ```
 

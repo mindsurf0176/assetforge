@@ -29,6 +29,7 @@ from .mflux_training import (
     MIN_LOCAL_TRAINING_FREE_DISK_GIB,
     build_mflux_training_plan,
     compile_mflux_train_command,
+    create_portable_training_bundle,
     mflux_training_doctor,
     prepare_training_data,
     run_mflux_training_plan,
@@ -262,7 +263,12 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--steps", type=int)
     p.add_argument("--guidance", type=float, default=1.0)
     p.add_argument("--quantize", type=int, choices=(3, 4, 5, 6, 8))
-    p.add_argument("--low-ram", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument(
+        "--low-ram",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="use MFLUX's lower-memory inference path (default: enabled)",
+    )
     p.add_argument("--mlx-cache-limit-gib", type=float, default=2.5)
     p.add_argument("--metadata", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--minimum-free-gib", type=float, default=6.0)
@@ -293,24 +299,61 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--sample-limit", required=True, type=int)
 
     p = sub.add_parser(
+        "mflux-train-bundle",
+        help="export a byte-pinned train-only bundle for another MFLUX host",
+    )
+    p.add_argument("--manifest", required=True)
+    p.add_argument("--output", required=True)
+    bundle_model = p.add_mutually_exclusive_group(required=True)
+    bundle_model.add_argument("--model-path")
+    bundle_model.add_argument(
+        "--model-lock",
+        help="trusted unquantized model fingerprint JSON when the large model stays remote",
+    )
+
+    p = sub.add_parser(
         "mflux-train-plan",
         help="validate, dry-run, or explicitly train a FLUX.2 edit-LoRA",
     )
-    p.add_argument("--manifest", required=True)
+    training_source = p.add_mutually_exclusive_group(required=True)
+    training_source.add_argument("--manifest")
+    training_source.add_argument(
+        "--bundle",
+        help="portable bundle directory or assetforge-mflux-bundle.json copied from another host",
+    )
+    p.add_argument(
+        "--expected-bundle-sha256",
+        help="required with --bundle; compare against the hash printed by mflux-train-bundle",
+    )
     p.add_argument("--model-path", required=True)
     p.add_argument("--config-output", required=True)
     p.add_argument("--prepared-data-path")
     p.add_argument("--sample-limit", type=int)
     p.add_argument("--checkpoint-output")
     p.add_argument("--executable")
-    p.add_argument("--low-ram", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument(
+        "--low-ram",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="must remain disabled; managed training rejects MFLUX's recursive cache cleanup",
+    )
     p.add_argument("--max-resolution", type=int, default=576)
-    p.add_argument("--epochs", type=int, default=100)
+    schedule = p.add_mutually_exclusive_group()
+    schedule.add_argument(
+        "--target-updates",
+        type=int,
+        help="derive whole epochs to reach at least this many optimizer updates (default: 1500)",
+    )
+    schedule.add_argument(
+        "--epochs",
+        type=int,
+        help="use an explicit epoch count instead of the target-update schedule",
+    )
     p.add_argument("--batch-size", type=int, default=1)
     p.add_argument("--learning-rate", type=float, default=1e-4)
-    p.add_argument("--checkpoint-frequency", type=int, default=25)
-    p.add_argument("--plot-frequency", type=int, default=1)
-    p.add_argument("--generate-image-frequency", type=int, default=20)
+    p.add_argument("--checkpoint-frequency", type=int, default=250)
+    p.add_argument("--plot-frequency", type=int, default=25)
+    p.add_argument("--generate-image-frequency", type=int, default=250)
     p.add_argument("--lora-rank", type=int, default=16)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument(
@@ -492,9 +535,21 @@ def main(argv: list[str] | None = None) -> int:
             )
             emit(result)
             return 0
+        if args.command == "mflux-train-bundle":
+            emit(
+                create_portable_training_bundle(
+                    args.manifest,
+                    args.output,
+                    model_path=args.model_path,
+                    model_lock_path=args.model_lock,
+                )
+            )
+            return 0
         if args.command == "mflux-train-plan":
             plan_data = build_mflux_training_plan(
                 args.manifest,
+                portable_bundle=args.bundle,
+                expected_bundle_sha256=args.expected_bundle_sha256,
                 model_path=args.model_path,
                 config_output=args.config_output,
                 prepared_data_path=args.prepared_data_path,
@@ -504,6 +559,7 @@ def main(argv: list[str] | None = None) -> int:
                 low_ram=args.low_ram,
                 max_resolution=args.max_resolution,
                 epochs=args.epochs,
+                target_updates=args.target_updates,
                 batch_size=args.batch_size,
                 learning_rate=args.learning_rate,
                 checkpoint_frequency=args.checkpoint_frequency,
