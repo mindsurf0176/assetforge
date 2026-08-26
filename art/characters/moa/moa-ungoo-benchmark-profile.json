@@ -31,6 +31,7 @@
     "alphaThreshold": 20,
     "palette": {"maxColors": 48, "lockAcrossClip": true},
     "anchor": {"type": "bottom-center", "maxFootDrift": 1},
+    "edgeMatte": {"mode": "remove-neutral", "minRgb": 190, "maxChannelSpread": 42, "maxLayers": 2, "maxPixels": 32},
     "identity": {"maxHeightDriftRatio": 0.15, "maxWidthDriftRatio": 0.5}
   },
   "export": {"engine": "godot", "format": "spriteframes", "resourcePrefix": "res://assets/sprites/moa_codex"}

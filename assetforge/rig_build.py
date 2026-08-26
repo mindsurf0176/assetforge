@@ -10,7 +10,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageOps
 
 from .clip_library import clips_for
-from .frames import remove_corner_background
+from .frames import remove_corner_background, remove_neutral_foreground_fringe
 from .json_utils import strict_json_loads
 from .path_safety import reset_output_directory, safe_output_child
 from .rig_core import RigError, render_frame, validate_production_part_contract, write_rig
@@ -117,7 +117,9 @@ def _canonical_slot(archetype: str, name: str) -> str:
 
 def _tight_part(path: Path, background_tolerance: int = 42) -> Image.Image:
     with Image.open(path) as opened:
-        image = remove_corner_background(opened, background_tolerance)
+        image = remove_neutral_foreground_fringe(
+            remove_corner_background(opened, background_tolerance)
+        )
     box = image.getchannel("A").getbbox()
     if box is None:
         raise RigError(f"part image has no foreground pixels: {path.name}")
@@ -212,7 +214,11 @@ def _sheet_foreground(
     rgba = np.asarray(image.convert("RGBA")).copy()
     if rgba[:, :, 3].min() < 255:
         return rgba, rgba[:, :, 3] > 0
-    cleaned = np.asarray(remove_corner_background(image, background_tolerance)).copy()
+    cleaned = np.asarray(
+        remove_neutral_foreground_fringe(
+            remove_corner_background(image, background_tolerance)
+        )
+    ).copy()
     return cleaned, cleaned[:, :, 3] > 0
 
 
@@ -811,7 +817,9 @@ def autorig_reference(
     if not source.is_file():
         raise FileNotFoundError(f"reference image not found: {source}")
     with Image.open(source) as opened:
-        cleaned = remove_corner_background(opened, background_tolerance)
+        cleaned = remove_neutral_foreground_fringe(
+            remove_corner_background(opened, background_tolerance)
+        )
     source_box = cleaned.getchannel("A").getbbox()
     if source_box is None:
         raise RigError("reference contains no foreground after background removal")

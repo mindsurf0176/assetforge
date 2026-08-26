@@ -52,6 +52,7 @@ from .rig_build import archetypes, extract_part_sheet
 from .redraw_dataset import build_redraw_dataset
 from .redraw_delivery import evaluate_redraw_holdout_batch, export_redraw_board_frames
 from .redraw_quality import evaluate_redraw_sample
+from .release import package_release, verify_release
 from .single_image import build_single_image_animation
 
 
@@ -212,6 +213,25 @@ def parser() -> argparse.ArgumentParser:
         "--deploy-dir",
         help="explicit frame deployment directory; omitted builds an output-adjacent artifact",
     )
+
+    p = sub.add_parser(
+        "release",
+        help="validate and package a complete character direction for another game project",
+    )
+    p.add_argument("--profile", required=True)
+    p.add_argument("--input", required=True, help="clip directories or a flat frame directory")
+    p.add_argument("--output", required=True)
+    p.add_argument("--character", required=True)
+    p.add_argument("--direction", required=True)
+    p.add_argument("--tier", required=True)
+    p.add_argument("--clips", help="comma-separated clips; defaults to every profile animation")
+    p.add_argument("--overwrite", action="store_true")
+
+    p = sub.add_parser(
+        "release-verify",
+        help="verify a portable AssetForge release manifest and every referenced frame hash",
+    )
+    p.add_argument("--manifest", required=True)
 
     p = sub.add_parser("build", help="ingest, validate and export in one deterministic pass")
     p.add_argument("--profile", required=True)
@@ -707,6 +727,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "mflux-train-extract":
             emit(extract_mflux_lora_adapter(args.checkpoint, args.output))
             return 0
+        if args.command == "release-verify":
+            result = verify_release(args.manifest)
+            emit(result)
+            return 0 if result["ok"] else 1
         profile = load_profile(args.profile)
         if args.command == "doctor":
             result = doctor(profile)
@@ -823,6 +847,19 @@ def main(argv: list[str] | None = None) -> int:
                 args.deploy_dir,
             )
             emit({"ok": True, "manifest": manifest, "validation": validation, "export": exported})
+            return 0
+        if args.command == "release":
+            result = package_release(
+                profile,
+                args.input,
+                args.output,
+                character=args.character,
+                direction=args.direction,
+                tier=args.tier,
+                clips=(parse_clips(args.clips) if args.clips is not None else None),
+                overwrite=args.overwrite,
+            )
+            emit(result)
             return 0
         if args.command == "comfy-compile":
             plan_data = strict_json_loads(Path(args.plan).expanduser().read_text(encoding="utf-8"))

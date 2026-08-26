@@ -85,7 +85,9 @@ def split_source_sheet(
         top = row * height // rows + crop_top
         bottom = min(height, top + cell_height)
         cropped = opened.crop((left, top, right, bottom))
-        cleaned = remove_neutral_edge_halo(remove_corner_background(cropped, 42))
+        cleaned = remove_neutral_foreground_fringe(
+            remove_neutral_edge_halo(remove_corner_background(cropped, 42))
+        )
         cleaned = harden_alpha(cleaned, 20)
         cleaned = keep_nearby_components(cleaned, max_component_gap, 20)
         frame = Image.new("RGBA", (cell_width, cell_height), (0, 0, 0, 0))
@@ -263,6 +265,123 @@ def remove_neutral_edge_halo(
                 queue.append((next_y, next_x))
 
     rgba[connected, 3] = 0
+    return Image.fromarray(rgba)
+
+
+def neutral_foreground_fringe_pixels(
+    image: Image.Image,
+    min_alpha: int = 20,
+    min_rgb: int = 235,
+    max_channel_spread: int = 18,
+) -> int:
+    """Count bright neutral opaque pixels directly touching transparent space."""
+
+    rgba = np.asarray(image.convert("RGBA"))
+    opaque = rgba[:, :, 3] > min_alpha
+    transparent = ~opaque
+    height, width = opaque.shape
+    touches_transparent = np.zeros_like(opaque)
+    for dy in (-1, 0, 1):
+        for dx in (-1, 0, 1):
+            if not (dy or dx):
+                continue
+            shifted = np.zeros_like(opaque)
+            ys = slice(max(0, dy), min(height, height + dy))
+            xs = slice(max(0, dx), min(width, width + dx))
+            source_ys = slice(max(0, -dy), min(height, height - dy))
+            source_xs = slice(max(0, -dx), min(width, width - dx))
+            shifted[ys, xs] = transparent[source_ys, source_xs]
+            touches_transparent |= shifted
+    rgb = rgba[:, :, :3]
+    neutral = (rgb.min(axis=2) >= min_rgb) & (
+        (rgb.max(axis=2) - rgb.min(axis=2)) <= max_channel_spread
+    )
+    return int((opaque & touches_transparent & neutral).sum())
+
+
+def remove_neutral_foreground_fringe(
+    image: Image.Image,
+    min_rgb: int = 235,
+    max_channel_spread: int = 18,
+    max_layers: int = 1,
+    min_alpha: int = 20,
+) -> Image.Image:
+    """Recolor bright neutral matte rings to a nearby authored outline color.
+
+    Recoloring instead of erasing preserves the silhouette and prevents a white
+    matte from turning into a jagged bite in light-colored hair or clothing.
+    """
+
+    if max_layers < 0:
+        raise ValueError("max_layers must be non-negative")
+    rgba = np.asarray(image.convert("RGBA")).copy()
+    height, width = rgba.shape[:2]
+    for _ in range(max_layers):
+        opaque = rgba[:, :, 3] > min_alpha
+        transparent = ~opaque
+        touches_transparent = np.zeros_like(opaque)
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                if not (dy or dx):
+                    continue
+                shifted = np.zeros_like(opaque)
+                ys = slice(max(0, dy), min(height, height + dy))
+                xs = slice(max(0, dx), min(width, width + dx))
+                source_ys = slice(max(0, -dy), min(height, height - dy))
+                source_xs = slice(max(0, -dx), min(width, width - dx))
+                shifted[ys, xs] = transparent[source_ys, source_xs]
+                touches_transparent |= shifted
+        rgb = rgba[:, :, :3]
+        neutral = (rgb.min(axis=2) >= min_rgb) & (
+            (rgb.max(axis=2) - rgb.min(axis=2)) <= max_channel_spread
+        )
+        fringe = opaque & touches_transparent & neutral
+        if not fringe.any():
+            break
+        luma = (
+            rgba[:, :, 0].astype(np.int32) * 299
+            + rgba[:, :, 1].astype(np.int32) * 587
+            + rgba[:, :, 2].astype(np.int32) * 114
+        )
+        updates: list[tuple[int, int, tuple[int, int, int]]] = []
+        for start_y, start_x in zip(*np.nonzero(fringe)):
+            frontier = [(int(start_y), int(start_x))]
+            seen = {(int(start_y), int(start_x))}
+            replacement: tuple[int, int, int] | None = None
+            for _distance in range(4):
+                next_frontier: list[tuple[int, int]] = []
+                candidates: list[tuple[int, tuple[int, int, int]]] = []
+                for y, x in frontier:
+                    for dy in (-1, 0, 1):
+                        for dx in (-1, 0, 1):
+                            if not (dy or dx):
+                                continue
+                            next_y, next_x = y + dy, x + dx
+                            if not (0 <= next_y < height and 0 <= next_x < width):
+                                continue
+                            point = (next_y, next_x)
+                            if point in seen or not opaque[next_y, next_x]:
+                                continue
+                            seen.add(point)
+                            if not neutral[next_y, next_x]:
+                                candidates.append(
+                                    (
+                                        int(luma[next_y, next_x]),
+                                        tuple(int(value) for value in rgba[next_y, next_x, :3]),
+                                    )
+                                )
+                            else:
+                                next_frontier.append(point)
+                if candidates:
+                    replacement = min(candidates, key=lambda item: item[0])[1]
+                    break
+                frontier = next_frontier
+                if not frontier:
+                    break
+            if replacement is not None:
+                updates.append((int(start_y), int(start_x), replacement))
+        for y, x, replacement in updates:
+            rgba[y, x, :3] = replacement
     return Image.fromarray(rgba)
 
 
@@ -605,6 +724,11 @@ def ingest_frames(
     quality = profile.data["quality"]
     min_alpha = int(quality.get("alphaThreshold", 20))
     background_quality = quality.get("background", {})
+    edge_matte = quality.get("edgeMatte", {})
+    edge_matte_mode = edge_matte.get("mode", "remove-neutral")
+    edge_matte_min_rgb = int(edge_matte.get("minRgb", 235))
+    edge_matte_spread = int(edge_matte.get("maxChannelSpread", 18))
+    edge_matte_layers = int(edge_matte.get("maxLayers", 1))
     tolerance = int(background_quality.get("tolerance", 42))
     max_repair_pixels = int(background_quality.get("maxRepairableEnclosedComponentPixels", 0))
     if preserve_motion:
@@ -624,6 +748,14 @@ def ingest_frames(
     prepared: list[Image.Image] = []
     for path in sources:
         image = remove_neutral_edge_halo(remove_corner_background(Image.open(path), tolerance))
+        if edge_matte_mode == "remove-neutral":
+            image = remove_neutral_foreground_fringe(
+                image,
+                min_rgb=edge_matte_min_rgb,
+                max_channel_spread=edge_matte_spread,
+                max_layers=edge_matte_layers,
+                min_alpha=min_alpha,
+            )
         image = harden_alpha(image, min_alpha)
         image = repair_small_enclosed_transparent_components(image, max_repair_pixels, min_alpha)
         box = alpha_bbox(image, min_alpha)
@@ -776,6 +908,14 @@ def ingest_frames(
                 x = canvas_anchor_x - image.width // 2
                 y = canvas_anchor_y - image.height + 1
             canvas.alpha_composite(image, (x, y))
+        if edge_matte_mode == "remove-neutral":
+            canvas = remove_neutral_foreground_fringe(
+                canvas,
+                min_rgb=edge_matte_min_rgb,
+                max_channel_spread=edge_matte_spread,
+                max_layers=edge_matte_layers,
+                min_alpha=min_alpha,
+            )
         path = safe_output_child(
             output,
             f"{animation}_{index:0{digits}d}.png",

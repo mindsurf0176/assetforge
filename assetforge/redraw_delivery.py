@@ -12,7 +12,7 @@ from typing import Any
 
 from PIL import Image, UnidentifiedImageError
 
-from .frames import alpha_bbox, remove_corner_background
+from .frames import alpha_bbox, remove_corner_background, remove_neutral_foreground_fringe
 from .json_utils import strict_json_loads
 from .path_safety import reset_output_directory, safe_output_child
 from .redraw_quality import evaluate_redraw_sample
@@ -416,7 +416,9 @@ def export_redraw_board_frames(
         left = (native_cell_width - canvas_width) // 2
         top = (native_cell_height - canvas_height) // 2
         frame = cell.crop((left, top, left + canvas_width, top + canvas_height))
-        frame = remove_corner_background(frame, background_tolerance)
+        frame = remove_neutral_foreground_fringe(
+            remove_corner_background(frame, background_tolerance)
+        )
         if frame.size != (canvas_width, canvas_height):
             raise RuntimeError(f"redraw frame cell {board_index} has an invalid canvas")
         if alpha_bbox(frame, 0) is None:

@@ -14,6 +14,7 @@ from .frames import (
     build_shared_palette,
     make_contact_sheet,
     remove_corner_background,
+    remove_neutral_foreground_fringe,
     remove_neutral_edge_halo,
 )
 from .local_animation import run_local_animation
@@ -63,7 +64,9 @@ def _normalize_redrawn_frames(
         decoded[clip] = []
         for path in paths:
             with Image.open(path) as opened:
-                image = remove_neutral_edge_halo(remove_corner_background(opened, 42))
+                image = remove_neutral_foreground_fringe(
+                    remove_neutral_edge_halo(remove_corner_background(opened, 42))
+                )
             box = image.getchannel("A").getbbox()
             if box is None:
                 raise ValueError(f"generated frame has no foreground: {path}")
@@ -265,7 +268,9 @@ def build_single_image_animation(
                 x = (frame_index % columns) * cell_size
                 y = (frame_index // columns) * cell_size
                 frame = board.crop((x, y, x + cell_size, y + cell_size))
-                frame = remove_neutral_edge_halo(remove_corner_background(frame, 42))
+                frame = remove_neutral_foreground_fringe(
+                    remove_neutral_edge_halo(remove_corner_background(frame, 42))
+                )
                 frame.save(
                     safe_output_child(
                         frames_dir,

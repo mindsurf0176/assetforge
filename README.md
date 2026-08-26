@@ -561,6 +561,41 @@ Animation-specific names such as `walk_00.png` are preferred. Provider-neutral n
 
 Local ComfyUI remains available through `comfy-compile`, `comfy-submit`, `comfy-run`, and `comfy-build`. Network submission is dry-run by default and requires `--execute`.
 
+## Release a game-ready character direction
+
+After a complete set has passed visual review, package it as a portable release
+instead of copying loose PNGs by hand. The input may contain either
+`<clip>/frames/*.png` directories or one flat directory named with clip
+prefixes such as `walk_00.png`.
+
+```bash
+assetforge release \
+  --profile art/characters/moa/moa-ungoo-benchmark-profile.json \
+  --input build/moa-ungoo-benchmark-clips-v12 \
+  --output build/releases/moa-east \
+  --character gemini \
+  --direction east \
+  --tier battle-candidate
+```
+
+The command fails closed when a clip is missing, a frame is not genuinely RGBA
+transparent, the canvas/palette/anchor contract fails, or a bright neutral
+foreground matte remains above the profile threshold. The output contains
+`profile.json`, `frames/<clip>/*.png`, and `release.json` with relative paths,
+FPS/loop metadata, validation summaries, and SHA-256 hashes. It is transactionally
+published and never replaces an existing release unless `--overwrite` is explicit.
+
+Verify the copied bundle after moving it into a game repository or another
+machine:
+
+```bash
+assetforge release-verify --manifest build/releases/moa-east/release.json
+```
+
+The release package is an asset delivery boundary, not a gameplay rule source:
+the engine still owns hitboxes, anchors in world space, state transitions, and
+combat timing.
+
 ## Profiles and contracts
 
 The packaged profiles are:
@@ -575,6 +610,7 @@ Packaged JSON Schemas:
 - `assetforge/profiles/assetforge-profile.schema.json`
 - `assetforge/schemas/rig-spec.schema.json`
 - `assetforge/schemas/animation-spec.schema.json`
+- `assetforge/schemas/release-manifest.schema.json`
 
 Profiles own canvas, minimum readable content size, palette, composed-frame alpha, source-part alpha, anchor, animation, validation, and export rules. `quality.partAlpha` is separate from final-frame transparency so a project can tune intentional holes in rings, wings, or tails without disabling composed-frame reporting. `tier.contentMin` prevents an oversized motion envelope from silently shrinking frames into unreadable pixels. Gameplay state, hit timing, damage, and combat outcomes remain deterministic game code.
 

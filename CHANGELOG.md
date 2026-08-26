@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.0 - 2026-08-27
+
+- Add a portable `release` package that validates every clip, copies frames into an isolated release tree, freezes the source profile, and records SHA-256 hashes.
+- Add `release-verify` to revalidate a release on another machine or game repository without trusting the recorded manifest.
+- Add profile-controlled neutral foreground matte cleanup for bright fringe pixels that survive background removal, with per-frame validation reports and regression coverage.
+- Apply the edge cleanup after final palette compositing so quantization cannot reintroduce a bright outline.
+
 ## 0.4.0 - 2026-07-23
 
 - Preserve a hand-authored RigSpec canvas verbatim when the selected profile tier uses `preservePlacement=true`.

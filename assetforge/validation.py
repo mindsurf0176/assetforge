@@ -9,7 +9,12 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
-from .frames import _metric, frame_paths, select_requested_animation_paths
+from .frames import (
+    _metric,
+    frame_paths,
+    neutral_foreground_fringe_pixels,
+    select_requested_animation_paths,
+)
 from .profile import Profile
 
 
@@ -116,6 +121,12 @@ def validate_frames(
     animation_contract = profile.animation(animation) if animation else {}
     min_alpha = int(quality.get("alphaThreshold", 20))
     background_quality = quality.get("background", {})
+    edge_matte = quality.get("edgeMatte", {})
+    edge_matte_min_rgb = int(edge_matte.get("minRgb", 235))
+    edge_matte_spread = int(edge_matte.get("maxChannelSpread", 18))
+    edge_matte_limit = edge_matte.get("maxPixels")
+    if edge_matte_limit is not None:
+        edge_matte_limit = int(edge_matte_limit)
     max_enclosed_transparent_pixels = background_quality.get("maxEnclosedTransparentPixels")
     if max_enclosed_transparent_pixels is not None:
         max_enclosed_transparent_pixels = int(max_enclosed_transparent_pixels)
@@ -133,6 +144,7 @@ def validate_frames(
             selection_error = str(exc)
     metrics = []
     transparent_holes: list[dict[str, Any]] = []
+    edge_matte_report: list[dict[str, Any]] = []
     errors: list[str] = [selection_error] if selection_error else []
     warnings: list[str] = []
 
@@ -142,6 +154,12 @@ def validate_frames(
             metrics.append(_metric(path, image, min_alpha))
             hole_areas = enclosed_transparent_hole_areas(image, min_alpha)
             hole_pixels = sum(hole_areas)
+            neutral_fringe = neutral_foreground_fringe_pixels(
+                image,
+                min_alpha=min_alpha,
+                min_rgb=edge_matte_min_rgb,
+                max_channel_spread=edge_matte_spread,
+            )
             transparent_holes.append(
                 {
                     "file": path.name,
@@ -150,6 +168,14 @@ def validate_frames(
                     "largestComponentPixels": hole_areas[0] if hole_areas else 0,
                 }
             )
+            edge_matte_report.append(
+                {"file": path.name, "neutralPixels": neutral_fringe}
+            )
+            if edge_matte_limit is not None and neutral_fringe > edge_matte_limit:
+                errors.append(
+                    f"{path.name}: {neutral_fringe} neutral foreground matte pixels exceeds "
+                    f"edgeMatte.maxPixels={edge_matte_limit}"
+                )
             if (
                 placement_mode != "shared-motion"
                 and
@@ -257,6 +283,12 @@ def validate_frames(
         "errors": errors,
         "warnings": warnings,
         "transparentHoles": transparent_holes,
+        "edgeMatte": {
+            "minRgb": edge_matte_min_rgb,
+            "maxChannelSpread": edge_matte_spread,
+            "maxPixels": edge_matte_limit,
+            "frames": edge_matte_report,
+        },
         "frames": [metric.__dict__ for metric in metrics],
     }
     if report_path:

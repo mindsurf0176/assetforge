@@ -2,10 +2,38 @@ import unittest
 
 from PIL import Image, ImageDraw
 
-from assetforge.frames import remove_neutral_edge_halo
+from assetforge.frames import (
+    neutral_foreground_fringe_pixels,
+    remove_neutral_edge_halo,
+    remove_neutral_foreground_fringe,
+)
 
 
 class TransparentHaloTests(unittest.TestCase):
+    def test_removes_attached_neutral_foreground_fringe_layers(self) -> None:
+        image = Image.new("RGBA", (13, 13), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((2, 2, 10, 10), fill=(221, 223, 224, 255))
+        draw.rectangle((4, 4, 8, 8), fill=(45, 50, 58, 255))
+
+        self.assertEqual(neutral_foreground_fringe_pixels(image, min_rgb=190, max_channel_spread=42), 32)
+        cleaned = remove_neutral_foreground_fringe(
+            image,
+            min_rgb=190,
+            max_channel_spread=42,
+            max_layers=2,
+        )
+
+        self.assertEqual(
+            neutral_foreground_fringe_pixels(
+                cleaned,
+                min_rgb=190,
+                max_channel_spread=42,
+            ),
+            0,
+        )
+        self.assertEqual(cleaned.getpixel((6, 6)), (45, 50, 58, 255))
+
     def test_removes_border_connected_white_matte(self) -> None:
         image = Image.new("RGBA", (9, 9), (255, 255, 255, 255))
         draw = ImageDraw.Draw(image)
