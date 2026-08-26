@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "id": "moa-vesper-candidate",
   "kind": "pixel-character",
-  "projectRoot": "/Users/minseo/projects/assetforge",
+  "projectRoot": ".",
   "directions": ["east"],
   "tiers": {
     "battle-candidate": {
