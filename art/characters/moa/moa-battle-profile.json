@@ -1,0 +1,37 @@
+{
+  "$schema": "../../../assetforge/profiles/assetforge-profile.schema.json",
+  "schemaVersion": 1,
+  "id": "moa-vesper-candidate",
+  "kind": "pixel-character",
+  "projectRoot": "/Users/minseo/projects/assetforge",
+  "directions": ["east"],
+  "tiers": {
+    "battle-candidate": {
+      "canvasPolicy": "fixed",
+      "canvas": [244, 247],
+      "anchor": [123, 243],
+      "contentMin": [16, 16],
+      "preservePlacement": true,
+      "padding": 3,
+      "filtering": "nearest",
+      "downscaleFiltering": "lanczos",
+      "allowUpscale": false,
+      "previewScale": 4
+    }
+  },
+  "animations": {
+    "idle": {"minFrames": 6, "maxFrames": 6, "fps": 8, "loop": true, "identity": {"maxHeightDriftRatio": 0.15, "maxWidthDriftRatio": 0.5}},
+    "walk": {"minFrames": 12, "maxFrames": 12, "fps": 12, "loop": true, "anchor": {"maxFootDrift": 1}, "identity": {"maxHeightDriftRatio": 0.15, "maxWidthDriftRatio": 0.5}},
+    "attack": {"minFrames": 14, "maxFrames": 14, "fps": 14, "loop": false, "identity": {"maxHeightDriftRatio": 0.4, "maxWidthDriftRatio": 0.6}},
+    "hit": {"minFrames": 6, "maxFrames": 6, "fps": 12, "loop": false, "identity": {"maxHeightDriftRatio": 0.25, "maxWidthDriftRatio": 0.5}},
+    "death": {"minFrames": 10, "maxFrames": 10, "fps": 10, "loop": false, "identity": {"maxHeightDriftRatio": 1.3, "maxWidthDriftRatio": 0.5}}
+  },
+  "quality": {
+    "background": {"mode": "transparent-or-corner", "tolerance": 42, "maxRepairableEnclosedComponentPixels": 0, "maxEnclosedTransparentPixels": 0},
+    "alphaThreshold": 20,
+    "palette": {"maxColors": 256, "lockAcrossClip": true},
+    "anchor": {"type": "bottom-center", "maxFootDrift": 1},
+    "identity": {"maxHeightDriftRatio": 0.15, "maxWidthDriftRatio": 0.5}
+  },
+  "export": {"engine": "godot", "format": "spriteframes", "resourcePrefix": "res://assets/sprites/moa_codex"}
+}

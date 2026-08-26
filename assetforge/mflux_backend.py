@@ -23,9 +23,11 @@ DEFAULT_BASE_MODEL = "flux2-klein-4b"
 DEFAULT_PROMPT = (
     "Use cell 0 as the exact character identity and pixel-art style reference. "
     "Replace every pose-guide cell with a finished frame of that same character. "
-    "Preserve the board layout, canvas size, background, palette, proportions, "
+    "Preserve the board layout, canvas size, transparent sprite background, palette, proportions, "
     "outline weight, and cell alignment. Do not add labels, crop, resize, merge, "
-    "remove, or reorder cells."
+    "remove, or reorder cells. Do not paint a white, gray, black, checkerboard, or gradient "
+    "backdrop. Output genuinely transparent RGBA pixels around every sprite and avoid "
+    "semi-transparent white matte or light halo pixels on the silhouette edge."
 )
 
 _MODEL_REPOSITORIES = {

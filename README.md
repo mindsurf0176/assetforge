@@ -366,6 +366,60 @@ assetforge animate \
 
 The manifest reports `quality: "coarse"`, `occlusionSynthesis: false`, alpha reconstruction IoU, unscored semantic confidence, omitted regions, and warnings. Reconstruction IoU only proves that visible alpha was preserved; it does not prove that the automatic semantic split was correct. Inspect `rig/rig-overlay.png` and the generated contact sheet. Coarse output can be exported into an isolated review artifact, but `--deploy-dir` is blocked until separated production art is approved.
 
+## Build animation and redraw boards from one image
+
+The one-image workflow packages the deterministic cutout result together with
+identity-plus-pose boards for a full-frame redraw backend:
+
+```bash
+assetforge single-image \
+  --reference art/creature-east.png \
+  --archetype winged-quadruped-side \
+  --character creature \
+  --clips idle,walk \
+  --frames idle=4,walk=8 \
+  --height 192 \
+  --output build/creature-one-image
+```
+
+This writes `cutout/` frames and one `redraw-boards/<clip>.png` per clip. Cell
+0 is the identity image and later cells are pose guides. With `--execute`, each
+board is redrawn as complete full-body frames, then AssetForge applies one
+shared palette, one common canvas, and a bottom anchor across every clip before
+writing `redrawn/normalized/`. The cutout frames remain `coarse`; only the
+redrawn normalized output is a `production-candidate` pending visual QA. Without
+a ready local model, the command fails closed and preserves the boards. Redraw
+prompts require genuine transparent RGBA sprite backgrounds; the delivery path
+also removes border-connected white/gray matte pixels and hardens the remaining
+silhouette alpha so light fringes do not reach the game runtime.
+
+## Ingest a generated source sheet with a fixed motion anchor
+
+When a generator returns one isolated horizontal sheet, ingest it as a shared-motion
+clip instead of independently centering each frame:
+
+```bash
+assetforge source-sheet \
+  --profile godot-pixel-demo \
+  --sheet art/vesper-attack-sheet.png \
+  --output build/vesper-attack \
+  --tier battle-generated \
+  --animation attack \
+  --direction east \
+  --columns 4 \
+  --crop-height 736 \
+  --source-anchor 228,735 \
+  --source-anchors '234,735;219,735;228,735;209,735' \
+  --source-bounds 0,0,456,736
+```
+
+The command pads uneven sheet cells to one canvas, removes flat-corner backgrounds,
+removes border-connected white/gray matte halos, hardens anti-aliased alpha edges,
+removes tiny/edge-connected sheet bleed, and keeps the supplied per-frame anchors.
+Validate the result with
+`--placement-mode shared-motion`; promote it to `battle-approved` only after visual
+review and runtime QA.
+
 ## Normalize, validate, and export in one run
 
 Add a packaged or custom profile to the same `animate` command:

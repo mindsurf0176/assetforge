@@ -8,7 +8,7 @@ from typing import Any
 
 from . import __version__
 from .exporters import export_assets
-from .frames import ingest_frames
+from .frames import ingest_frames, split_source_sheet
 from .json_utils import strict_json_loads
 from .local_animation import (
     parse_clips,
@@ -52,10 +52,28 @@ from .rig_build import archetypes, extract_part_sheet
 from .redraw_dataset import build_redraw_dataset
 from .redraw_delivery import evaluate_redraw_holdout_batch, export_redraw_board_frames
 from .redraw_quality import evaluate_redraw_sample
+from .single_image import build_single_image_animation
 
 
 def emit(value: Any) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2))
+
+
+def parse_int_tuple(value: str, expected: int, label: str) -> tuple[int, ...]:
+    try:
+        parsed = tuple(int(part.strip()) for part in value.split(","))
+    except ValueError as exc:
+        raise ValueError(f"{label} must be comma-separated integers") from exc
+    if len(parsed) != expected:
+        raise ValueError(f"{label} must contain {expected} integers")
+    return parsed
+
+
+def parse_int_pairs(value: str, label: str) -> list[tuple[int, int]]:
+    pairs = [parse_int_tuple(item, 2, label) for item in value.split(";") if item.strip()]
+    if not pairs:
+        raise ValueError(f"{label} must contain one or more x,y pairs")
+    return [(pair[0], pair[1]) for pair in pairs]
 
 
 def parser() -> argparse.ArgumentParser:
@@ -100,6 +118,36 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--deploy-dir", help="explicit game asset root; requires --resource-prefix")
     p.add_argument("--no-mirror", action="store_true", help="do not synthesize missing back-side limbs")
 
+    p = sub.add_parser(
+        "single-image",
+        help="build cutout animation plus full-frame redraw boards from one character image",
+    )
+    p.add_argument("--reference", required=True)
+    p.add_argument("--output", required=True)
+    p.add_argument("--archetype", choices=archetypes(), required=True)
+    p.add_argument("--character", required=True)
+    p.add_argument("--direction", default="east")
+    p.add_argument("--clips")
+    p.add_argument("--frames")
+    p.add_argument("--height", type=int, default=192)
+    p.add_argument("--resample", choices=("nearest", "bicubic"), default="nearest")
+    p.add_argument("--executable")
+    p.add_argument("--model", default=MFLUX_DEFAULT_MODEL)
+    p.add_argument("--base-model", default=MFLUX_DEFAULT_BASE_MODEL)
+    p.add_argument("--model-path")
+    p.add_argument("--cache-dir")
+    p.add_argument("--lora", action="append")
+    p.add_argument("--lora-scale", type=float, default=1.0)
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--steps", type=int)
+    p.add_argument("--guidance", type=float, default=1.0)
+    p.add_argument("--quantize", type=int, choices=(3, 4, 5, 6, 8))
+    p.add_argument("--low-ram", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--mlx-cache-limit-gib", type=float, default=2.5)
+    p.add_argument("--minimum-free-gib", type=float, default=6.0)
+    p.add_argument("--overwrite", action="store_true")
+    p.add_argument("--execute", action="store_true", help="run MFLUX after planning; requires a ready local model")
+
     p = sub.add_parser("doctor", help="check profile, project, provider and toolchain readiness")
     p.add_argument("--profile", required=True)
 
@@ -120,6 +168,28 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--tier", required=True)
     p.add_argument("--animation", required=True)
     p.add_argument("--direction", required=True)
+    p.add_argument("--placement-mode", choices=("per-frame-anchor", "shared-motion"), default="per-frame-anchor")
+    p.add_argument("--source-anchor", help="source anchor as x,y for shared-motion placement")
+    p.add_argument("--source-anchors", help="per-frame source anchors as x,y;x,y for shared-motion placement")
+    p.add_argument("--source-bounds", help="source envelope as left,top,right,bottom")
+
+    p = sub.add_parser(
+        "source-sheet",
+        help="split one isolated animation sheet and ingest it with a shared motion anchor",
+    )
+    p.add_argument("--profile", required=True)
+    p.add_argument("--sheet", required=True)
+    p.add_argument("--output", required=True)
+    p.add_argument("--tier", required=True)
+    p.add_argument("--animation", required=True)
+    p.add_argument("--direction", required=True)
+    p.add_argument("--columns", type=int, required=True)
+    p.add_argument("--rows", type=int, default=1)
+    p.add_argument("--crop-top", type=int, default=0)
+    p.add_argument("--crop-height", type=int)
+    p.add_argument("--source-anchor", required=True, help="source anchor as x,y")
+    p.add_argument("--source-anchors", help="per-frame source anchors as x,y;x,y")
+    p.add_argument("--source-bounds", required=True, help="source envelope as left,top,right,bottom")
 
     p = sub.add_parser("validate", help="validate normalized frames against a profile")
     p.add_argument("--profile", required=True)
@@ -127,6 +197,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--tier", required=True)
     p.add_argument("--animation")
     p.add_argument("--report")
+    p.add_argument("--placement-mode", choices=("per-frame-anchor", "shared-motion"), default="per-frame-anchor")
 
     p = sub.add_parser("export", help="export normalized frames for the profile engine")
     p.add_argument("--profile", required=True)
@@ -456,6 +527,36 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "redraw-dataset":
             emit(build_redraw_dataset(args.spec, args.output))
             return 0
+        if args.command == "single-image":
+            result = build_single_image_animation(
+                reference=args.reference,
+                output=args.output,
+                character=args.character,
+                archetype=args.archetype,
+                direction=args.direction,
+                clips=(parse_clips(args.clips) if args.clips is not None else None),
+                frame_overrides=parse_frame_counts(args.frames),
+                height=args.height,
+                resample=args.resample,
+                execute=args.execute,
+                executable=args.executable,
+                model=args.model,
+                base_model=args.base_model,
+                model_path=args.model_path,
+                cache_dir=args.cache_dir,
+                lora=args.lora,
+                lora_scale=args.lora_scale,
+                seed=args.seed,
+                steps=args.steps,
+                guidance=args.guidance,
+                quantize=args.quantize,
+                low_ram=args.low_ram,
+                mlx_cache_limit_gib=args.mlx_cache_limit_gib,
+                minimum_free_gib=args.minimum_free_gib,
+                overwrite=args.overwrite,
+            )
+            emit(result)
+            return 0 if result.get("ok") else 1
         if args.command == "redraw-quality":
             result = evaluate_redraw_sample(args.manifest, args.sample, args.generated)
             emit(result)
@@ -620,10 +721,70 @@ def main(argv: list[str] | None = None) -> int:
             emit(result)
             return 0
         if args.command == "ingest":
-            emit(ingest_frames(profile, args.input, args.output, args.tier, args.animation, args.direction))
+            source_anchor = (
+                parse_int_tuple(args.source_anchor, 2, "--source-anchor")
+                if args.source_anchor
+                else None
+            )
+            source_bounds = (
+                parse_int_tuple(args.source_bounds, 4, "--source-bounds")
+                if args.source_bounds
+                else None
+            )
+            source_anchors = parse_int_pairs(args.source_anchors, "--source-anchors") if args.source_anchors else None
+            emit(
+                ingest_frames(
+                    profile,
+                    args.input,
+                    args.output,
+                    args.tier,
+                    args.animation,
+                    args.direction,
+                    placement_mode=args.placement_mode,
+                    source_anchor=source_anchor,
+                    source_anchors=source_anchors,
+                    source_bounds=source_bounds,
+                )
+            )
+            return 0
+        if args.command == "source-sheet":
+            source_anchor = parse_int_tuple(args.source_anchor, 2, "--source-anchor")
+            source_bounds = parse_int_tuple(args.source_bounds, 4, "--source-bounds")
+            source_anchors = parse_int_pairs(args.source_anchors, "--source-anchors") if args.source_anchors else None
+            sheet_output = Path(args.output).expanduser().resolve() / "source-frames"
+            split_source_sheet(
+                args.sheet,
+                sheet_output,
+                columns=args.columns,
+                rows=args.rows,
+                crop_top=args.crop_top,
+                crop_height=args.crop_height,
+                prefix=args.animation,
+            )
+            emit(
+                ingest_frames(
+                    profile,
+                    sheet_output,
+                    Path(args.output).expanduser().resolve() / "frames",
+                    args.tier,
+                    args.animation,
+                    args.direction,
+                    placement_mode="shared-motion",
+                    source_anchor=source_anchor,
+                    source_anchors=source_anchors,
+                    source_bounds=source_bounds,
+                )
+            )
             return 0
         if args.command == "validate":
-            result = validate_frames(profile, args.input, args.tier, args.animation, args.report)
+            result = validate_frames(
+                profile,
+                args.input,
+                args.tier,
+                args.animation,
+                args.report,
+                placement_mode=args.placement_mode,
+            )
             emit(result)
             return 0 if result["ok"] else 1
         if args.command == "export":
