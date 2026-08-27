@@ -385,6 +385,65 @@ def remove_neutral_foreground_fringe(
     return Image.fromarray(rgba)
 
 
+def recolor_detached_neutral_bottom_lines(
+    image: Image.Image,
+    min_rgb: int = 235,
+    max_channel_spread: int = 18,
+    max_line_pixels: int = 32,
+    max_gap_rows: int = 2,
+    min_alpha: int = 20,
+) -> Image.Image:
+    """Recolor short bright neutral lines detached just below a sprite.
+
+    Some cutout generators place a light shoe sole on the last opaque row while
+    leaving one transparent row between it and the authored dark outline. The
+    normal fringe pass cannot find a neighboring material through that gap, so
+    the sole survives as a visible white stripe on light game backgrounds.
+    Only short runs on the lowest opaque row are touched; highlights elsewhere
+    remain intact.
+    """
+
+    if max_line_pixels < 0 or max_gap_rows < 0:
+        raise ValueError("bottom neutral line limits must be non-negative")
+    rgba = np.asarray(image.convert("RGBA")).copy()
+    opaque = rgba[:, :, 3] > min_alpha
+    if not opaque.any() or max_line_pixels == 0:
+        return Image.fromarray(rgba)
+    bottom = int(np.nonzero(opaque)[0].max())
+    rgb = rgba[:, :, :3]
+    neutral = (rgb.min(axis=2) >= min_rgb) & (
+        (rgb.max(axis=2) - rgb.min(axis=2)) <= max_channel_spread
+    )
+    runs: list[tuple[int, int]] = []
+    start: int | None = None
+    for x in range(opaque.shape[1] + 1):
+        is_line = x < opaque.shape[1] and opaque[bottom, x] and neutral[bottom, x]
+        if is_line and start is None:
+            start = x
+        elif not is_line and start is not None:
+            runs.append((start, x))
+            start = None
+    for left, right in runs:
+        if right - left > max_line_pixels:
+            continue
+        candidates: list[tuple[int, int, tuple[int, int, int]]] = []
+        for gap in range(1, max_gap_rows + 2):
+            y = bottom - gap
+            if y < 0:
+                break
+            for x in range(max(0, left - 1), min(opaque.shape[1], right + 1)):
+                if not opaque[y, x] or neutral[y, x]:
+                    continue
+                color = tuple(int(value) for value in rgba[y, x, :3])
+                luma = 299 * color[0] + 587 * color[1] + 114 * color[2]
+                candidates.append((gap, luma, color))
+        if not candidates:
+            continue
+        replacement = min(candidates, key=lambda item: (item[0], item[1], item[2]))[2]
+        rgba[bottom, left:right, :3] = replacement
+    return Image.fromarray(rgba)
+
+
 def harden_alpha(image: Image.Image, min_alpha: int = 20) -> Image.Image:
     """Turn anti-aliased edge alpha into a crisp transparent/opaque sprite edge."""
 
@@ -729,6 +788,10 @@ def ingest_frames(
     edge_matte_min_rgb = int(edge_matte.get("minRgb", 235))
     edge_matte_spread = int(edge_matte.get("maxChannelSpread", 18))
     edge_matte_layers = int(edge_matte.get("maxLayers", 1))
+    bottom_line = edge_matte.get("bottomNeutralLine", {})
+    bottom_line_mode = bottom_line.get("mode", "off")
+    bottom_line_pixels = int(bottom_line.get("maxLinePixels", 32))
+    bottom_line_gap = int(bottom_line.get("maxGapRows", 2))
     tolerance = int(background_quality.get("tolerance", 42))
     max_repair_pixels = int(background_quality.get("maxRepairableEnclosedComponentPixels", 0))
     if preserve_motion:
@@ -916,6 +979,15 @@ def ingest_frames(
                 max_layers=edge_matte_layers,
                 min_alpha=min_alpha,
             )
+            if bottom_line_mode == "recolor":
+                canvas = recolor_detached_neutral_bottom_lines(
+                    canvas,
+                    min_rgb=edge_matte_min_rgb,
+                    max_channel_spread=edge_matte_spread,
+                    max_line_pixels=bottom_line_pixels,
+                    max_gap_rows=bottom_line_gap,
+                    min_alpha=min_alpha,
+                )
         path = safe_output_child(
             output,
             f"{animation}_{index:0{digits}d}.png",

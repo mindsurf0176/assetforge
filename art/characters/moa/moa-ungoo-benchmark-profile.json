@@ -31,7 +31,7 @@
     "alphaThreshold": 20,
     "palette": {"maxColors": 128, "lockAcrossClip": true},
     "anchor": {"type": "bottom-center", "maxFootDrift": 1},
-    "edgeMatte": {"mode": "remove-neutral", "minRgb": 190, "maxChannelSpread": 42, "maxLayers": 2, "maxPixels": 32},
+    "edgeMatte": {"mode": "remove-neutral", "minRgb": 190, "maxChannelSpread": 42, "maxLayers": 2, "maxPixels": 32, "bottomNeutralLine": {"mode": "recolor", "maxLinePixels": 32, "maxGapRows": 2}},
     "identity": {"maxHeightDriftRatio": 0.15, "maxWidthDriftRatio": 0.5}
   },
   "export": {"engine": "godot", "format": "spriteframes", "resourcePrefix": "res://assets/sprites/moa_codex"}

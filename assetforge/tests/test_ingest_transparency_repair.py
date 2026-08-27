@@ -11,7 +11,11 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from assetforge.cli import main
-from assetforge.frames import ingest_frames, repair_small_enclosed_transparent_components
+from assetforge.frames import (
+    ingest_frames,
+    recolor_detached_neutral_bottom_lines,
+    repair_small_enclosed_transparent_components,
+)
 from assetforge.profile import Profile
 from assetforge.validation import enclosed_transparent_hole_areas, validate_frames
 
@@ -70,6 +74,32 @@ def _sprite(path: Path, hole_size: int = 1, body: tuple[int, int, int, int] = BO
 
 
 class IngestTransparencyRepairTests(unittest.TestCase):
+    def test_detached_bright_bottom_line_uses_nearby_dark_outline(self) -> None:
+        image = Image.new("RGBA", (16, 16), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((5, 5, 10, 10), fill=(20, 28, 45, 255))
+        draw.rectangle((6, 12, 9, 12), fill=(235, 237, 237, 255))
+        repaired = recolor_detached_neutral_bottom_lines(
+            image,
+            min_rgb=190,
+            max_channel_spread=42,
+            max_line_pixels=8,
+            max_gap_rows=2,
+        )
+        rgba = np.asarray(repaired)
+
+        self.assertEqual(tuple(int(value) for value in rgba[12, 7, :3]), (20, 28, 45))
+
+    def test_detached_line_pass_does_not_touch_unrelated_highlight(self) -> None:
+        image = Image.new("RGBA", (16, 16), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((5, 5, 10, 10), fill=(20, 28, 45, 255))
+        draw.point((7, 7), fill=(235, 237, 237, 255))
+        repaired = recolor_detached_neutral_bottom_lines(image, min_rgb=190, max_channel_spread=42)
+        rgba = np.asarray(repaired)
+
+        self.assertEqual(tuple(int(value) for value in rgba[7, 7, :3]), (235, 237, 237))
+
     def test_one_pixel_component_uses_existing_majority_boundary_color(self) -> None:
         image = Image.new("RGBA", (16, 16), (0, 0, 0, 0))
         draw = ImageDraw.Draw(image)

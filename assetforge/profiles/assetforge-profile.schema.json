@@ -197,7 +197,16 @@
             "minRgb": {"type": "integer", "minimum": 0, "maximum": 255},
             "maxChannelSpread": {"type": "integer", "minimum": 0, "maximum": 255},
             "maxLayers": {"type": "integer", "minimum": 0, "maximum": 8},
-            "maxPixels": {"type": "integer", "minimum": 0}
+            "maxPixels": {"type": "integer", "minimum": 0},
+            "bottomNeutralLine": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "mode": {"enum": ["off", "recolor"]},
+                "maxLinePixels": {"type": "integer", "minimum": 0},
+                "maxGapRows": {"type": "integer", "minimum": 0}
+              }
+            }
           }
         },
         "identity": {"$ref": "#/$defs/identity"}

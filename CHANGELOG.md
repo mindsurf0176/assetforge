@@ -5,6 +5,7 @@
 - Add a portable `release` package that validates every clip, copies frames into an isolated release tree, freezes the source profile, and records SHA-256 hashes.
 - Add `release-verify` to revalidate a release on another machine or game repository without trusting the recorded manifest.
 - Add profile-controlled neutral foreground matte cleanup for bright fringe pixels that survive background removal, with per-frame validation reports and regression coverage.
+- Add bounded bottom-line recoloring for detached neutral shoe highlights that can otherwise read as white strips on light backgrounds.
 - Apply the edge cleanup after final palette compositing so quantization cannot reintroduce a bright outline.
 
 ## 0.4.0 - 2026-07-23
