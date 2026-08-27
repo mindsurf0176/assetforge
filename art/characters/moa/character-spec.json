@@ -58,7 +58,7 @@
     "skin": [225, 174, 146],
     "hair": [190, 220, 221],
     "effect": [213, 255, 247],
-    "maxColors": 48,
+    "maxColors": 128,
     "lockAcrossClip": true
   },
   "weapon": {
@@ -79,7 +79,7 @@
     "sourceMode": "identity-plus-independent-frame-poses",
     "identityReference": "ungoo-benchmark/moa-ungoo-benchmark-master-v1.png; 256x253, 63-color transparent production-style master; retains Moa identity while using Ungoo rifleman as pixel-production benchmark only",
     "productionStyleBenchmark": "Starline Ungoo rifleman: compact 256x253 silhouette, restricted palette, hard pixel clusters, stable side-view frame-to-frame motion; no character, weapon, pose, or pixel reuse",
-    "pixelPolish": "2x logical-pixel raster pass with nearest enlargement and shared 48-color palette; preserve source frames and review both 1x and 4x",
+    "pixelPolish": "native nearest-pixel raster pass with a shared 128-color palette; preserve source frames and review both 1x and 4x",
     "frameMode": "one complete transparent frame per authored pose, then shared-motion normalize",
     "promptConstraints": [
       "genuine transparent RGBA background",

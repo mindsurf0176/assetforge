@@ -29,7 +29,7 @@
   "quality": {
     "background": {"mode": "transparent-or-corner", "tolerance": 42, "maxRepairableEnclosedComponentPixels": 0, "maxEnclosedTransparentPixels": 2000},
     "alphaThreshold": 20,
-    "palette": {"maxColors": 48, "lockAcrossClip": true},
+    "palette": {"maxColors": 128, "lockAcrossClip": true},
     "anchor": {"type": "bottom-center", "maxFootDrift": 1},
     "edgeMatte": {"mode": "remove-neutral", "minRgb": 190, "maxChannelSpread": 42, "maxLayers": 2, "maxPixels": 32},
     "identity": {"maxHeightDriftRatio": 0.15, "maxWidthDriftRatio": 0.5}
