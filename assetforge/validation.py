@@ -212,7 +212,11 @@ def validate_frames(
     anchor_quality.update(animation_contract.get("anchor", {}))
     anchor_tolerance = int(anchor_quality.get("maxFootDrift", 1))
     anchor = tier.get("anchor")
-    if anchor:
+    # A preserved rig owns its pixel coordinates. Applying the profile's
+    # generated-frame ground-line gate here would reject valid hand-authored
+    # RigSpec placement before the dedicated overflow checks get a chance to
+    # report the real contract violation.
+    if anchor and not tier.get("preservePlacement", False):
         expected_y = int(anchor[1])
         if placement_mode == "shared-motion":
             # The first authored pose must start on the profile ground line.

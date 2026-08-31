@@ -8,7 +8,8 @@ from typing import Any
 
 from . import __version__
 from .exporters import export_assets
-from .frames import ingest_frames, split_source_sheet
+from .frames import ingest_frames, infer_source_sheet_anchors, split_source_sheet
+from .generation_backends import SheetRequest, codex_imagegen_sheet_prompt
 from .json_utils import strict_json_loads
 from .local_animation import (
     parse_clips,
@@ -36,6 +37,7 @@ from .mflux_training import (
     write_mflux_training_config,
 )
 from .profile import ProfileError, list_profiles, load_profile
+from .pipeline import build_pipeline
 from .providers import (
     compile_comfy_request,
     doctor,
@@ -162,6 +164,20 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--reference")
     p.add_argument("--write")
 
+    p = sub.add_parser(
+        "codex-prompt",
+        help="write the canonical Codex Imagegen prompt for one complete animation sheet",
+    )
+    p.add_argument("--character", required=True)
+    p.add_argument("--animation", required=True)
+    p.add_argument("--direction", default="east")
+    p.add_argument("--frames", type=int, required=True)
+    p.add_argument("--columns", type=int, required=True)
+    p.add_argument("--rows", type=int, default=1)
+    p.add_argument("--reference")
+    p.add_argument("--pose-guide")
+    p.add_argument("--output", required=True)
+
     p = sub.add_parser("ingest", help="normalize generated frames into the profile contract")
     p.add_argument("--profile", required=True)
     p.add_argument("--input", required=True)
@@ -186,11 +202,17 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--direction", required=True)
     p.add_argument("--columns", type=int, required=True)
     p.add_argument("--rows", type=int, default=1)
+    p.add_argument("--frame-count", type=int, help="number of populated cells to ingest from the sheet")
     p.add_argument("--crop-top", type=int, default=0)
     p.add_argument("--crop-height", type=int)
-    p.add_argument("--source-anchor", required=True, help="source anchor as x,y")
+    p.add_argument("--source-anchor", help="source anchor as x,y")
     p.add_argument("--source-anchors", help="per-frame source anchors as x,y;x,y")
-    p.add_argument("--source-bounds", required=True, help="source envelope as left,top,right,bottom")
+    p.add_argument("--source-bounds", help="source envelope as left,top,right,bottom")
+    p.add_argument(
+        "--auto-anchor",
+        action="store_true",
+        help="infer each cell's bottom-center foreground anchor and use the full cell envelope",
+    )
 
     p = sub.add_parser("validate", help="validate normalized frames against a profile")
     p.add_argument("--profile", required=True)
@@ -213,6 +235,31 @@ def parser() -> argparse.ArgumentParser:
         "--deploy-dir",
         help="explicit frame deployment directory; omitted builds an output-adjacent artifact",
     )
+
+    p = sub.add_parser(
+        "pipeline",
+        help="one-shot provider-independent sheet/frames pipeline: normalize, validate and export",
+    )
+    p.add_argument("--profile", required=True)
+    p.add_argument("--input", required=True, help="a complete animation sheet or a frame directory")
+    p.add_argument("--input-kind", choices=("auto", "sheet", "frames"), default="auto")
+    p.add_argument("--work", required=True)
+    p.add_argument("--output", required=True)
+    p.add_argument("--character", required=True)
+    p.add_argument("--tier", required=True)
+    p.add_argument("--animation", required=True)
+    p.add_argument("--direction", required=True)
+    p.add_argument("--columns", type=int)
+    p.add_argument("--rows", type=int, default=1)
+    p.add_argument("--frame-count", type=int)
+    p.add_argument("--auto-anchor", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--source-anchor", help="manual source anchor x,y")
+    p.add_argument("--source-anchors", help="manual anchors x,y;x,y")
+    p.add_argument("--source-bounds", help="manual source envelope left,top,right,bottom")
+    p.add_argument("--backend", default="external", help="generator label recorded in the pipeline manifest")
+    p.add_argument("--generation-manifest", help="optional provider metadata JSON to embed in the pipeline manifest")
+    p.add_argument("--resource-prefix")
+    p.add_argument("--deploy-dir")
 
     p = sub.add_parser(
         "release",
@@ -731,6 +778,22 @@ def main(argv: list[str] | None = None) -> int:
             result = verify_release(args.manifest)
             emit(result)
             return 0 if result["ok"] else 1
+        if args.command == "codex-prompt":
+            request = SheetRequest(
+                character=args.character,
+                animation=args.animation,
+                direction=args.direction,
+                frame_count=args.frames,
+                columns=args.columns,
+                rows=args.rows,
+                reference=Path(args.reference).expanduser().resolve() if args.reference else None,
+                pose_guide=Path(args.pose_guide).expanduser().resolve() if args.pose_guide else None,
+            )
+            output = Path(args.output).expanduser().resolve()
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(codex_imagegen_sheet_prompt(request) + "\n", encoding="utf-8")
+            emit({"ok": True, "backend": "codex_imagegen", "prompt": str(output)})
+            return 0
         profile = load_profile(args.profile)
         if args.command == "doctor":
             result = doctor(profile)
@@ -772,19 +835,33 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0
         if args.command == "source-sheet":
-            source_anchor = parse_int_tuple(args.source_anchor, 2, "--source-anchor")
-            source_bounds = parse_int_tuple(args.source_bounds, 4, "--source-bounds")
-            source_anchors = parse_int_pairs(args.source_anchors, "--source-anchors") if args.source_anchors else None
+            if args.auto_anchor:
+                if args.source_anchor or args.source_anchors or args.source_bounds:
+                    raise ValueError("--auto-anchor cannot be combined with manual source anchor options")
+                source_anchor = None
+                source_anchors = None
+                source_bounds = None
+                placement_mode = "per-frame-anchor"
+            else:
+                if not args.source_anchor or not args.source_bounds:
+                    raise ValueError("source-sheet requires --auto-anchor or both --source-anchor and --source-bounds")
+                source_anchor = parse_int_tuple(args.source_anchor, 2, "--source-anchor")
+                source_bounds = parse_int_tuple(args.source_bounds, 4, "--source-bounds")
+                source_anchors = parse_int_pairs(args.source_anchors, "--source-anchors") if args.source_anchors else None
+                placement_mode = "shared-motion"
             sheet_output = Path(args.output).expanduser().resolve() / "source-frames"
-            split_source_sheet(
+            split_paths = split_source_sheet(
                 args.sheet,
                 sheet_output,
                 columns=args.columns,
                 rows=args.rows,
+                frame_count=args.frame_count,
                 crop_top=args.crop_top,
                 crop_height=args.crop_height,
                 prefix=args.animation,
             )
+            if args.auto_anchor:
+                source_anchors, source_bounds = infer_source_sheet_anchors(split_paths)
             emit(
                 ingest_frames(
                     profile,
@@ -793,10 +870,11 @@ def main(argv: list[str] | None = None) -> int:
                     args.tier,
                     args.animation,
                     args.direction,
-                    placement_mode="shared-motion",
+                    placement_mode=placement_mode,
                     source_anchor=source_anchor,
                     source_anchors=source_anchors,
                     source_bounds=source_bounds,
+                    allow_source_resize=args.auto_anchor,
                 )
             )
             return 0
@@ -848,6 +926,34 @@ def main(argv: list[str] | None = None) -> int:
             )
             emit({"ok": True, "manifest": manifest, "validation": validation, "export": exported})
             return 0
+        if args.command == "pipeline":
+            source_anchor = parse_int_tuple(args.source_anchor, 2, "--source-anchor") if args.source_anchor else None
+            source_bounds = parse_int_tuple(args.source_bounds, 4, "--source-bounds") if args.source_bounds else None
+            source_anchors = parse_int_pairs(args.source_anchors, "--source-anchors") if args.source_anchors else None
+            result = build_pipeline(
+                profile,
+                args.input,
+                args.work,
+                args.output,
+                character=args.character,
+                tier=args.tier,
+                animation=args.animation,
+                direction=args.direction,
+                input_kind=args.input_kind,
+                columns=args.columns,
+                rows=args.rows,
+                frame_count=args.frame_count,
+                auto_anchor=args.auto_anchor,
+                source_anchor=source_anchor,
+                source_anchors=source_anchors,
+                source_bounds=source_bounds,
+                backend=args.backend,
+                generation_manifest=args.generation_manifest,
+                resource_prefix=args.resource_prefix,
+                deploy_dir=args.deploy_dir,
+            )
+            emit(result)
+            return 0 if result["ok"] else 1
         if args.command == "release":
             result = package_release(
                 profile,

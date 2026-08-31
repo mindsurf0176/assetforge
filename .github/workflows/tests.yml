@@ -35,9 +35,12 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: python -m pip install --upgrade pip build
-      - run: python -m build --wheel
+      # The repository has a build/ artifact directory; run from /tmp so it
+      # cannot shadow the `build` package's module entry point.
+      - run: mkdir -p /tmp/assetforge-dist
+      - run: cd /tmp && python -m build "$GITHUB_WORKSPACE" --outdir /tmp/assetforge-dist
       - run: python -m venv /tmp/assetforge-wheel-smoke
-      - run: /tmp/assetforge-wheel-smoke/bin/python -m pip install dist/*.whl
+      - run: /tmp/assetforge-wheel-smoke/bin/python -m pip install /tmp/assetforge-dist/*.whl
       - run: cd /tmp && /tmp/assetforge-wheel-smoke/bin/assetforge --version
       - run: cd /tmp && /tmp/assetforge-wheel-smoke/bin/assetforge profiles
       - name: Verify packaged contracts

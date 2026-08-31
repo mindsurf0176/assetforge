@@ -51,6 +51,7 @@ def split_source_sheet(
     *,
     columns: int,
     rows: int = 1,
+    frame_count: int | None = None,
     crop_top: int = 0,
     crop_height: int | None = None,
     prefix: str = "frame",
@@ -65,6 +66,11 @@ def split_source_sheet(
 
     if columns < 1 or rows < 1:
         raise ValueError("source sheet rows and columns must be positive")
+    total_cells = columns * rows
+    if frame_count is None:
+        frame_count = total_cells
+    if frame_count < 1 or frame_count > total_cells:
+        raise ValueError("source sheet frame_count must be between 1 and the number of cells")
     opened = Image.open(Path(sheet).expanduser()).convert("RGBA")
     width, height = opened.size
     cell_width = math.ceil(width / columns)
@@ -77,7 +83,7 @@ def split_source_sheet(
     output.mkdir(parents=True, exist_ok=True)
     background = tuple(opened.getpixel((0, 0)))
     paths: list[Path] = []
-    for index in range(columns * rows):
+    for index in range(frame_count):
         column = index % columns
         row = index // columns
         left = column * width // columns
@@ -85,9 +91,11 @@ def split_source_sheet(
         top = row * height // rows + crop_top
         bottom = min(height, top + cell_height)
         cropped = opened.crop((left, top, right, bottom))
+        cleaned = remove_chroma_background(cropped, 42)
         cleaned = remove_neutral_foreground_fringe(
-            remove_neutral_edge_halo(remove_corner_background(cropped, 42))
+            remove_neutral_edge_halo(remove_corner_background(cleaned, 42))
         )
+        cleaned = remove_sheet_separator_lines(cleaned)
         cleaned = harden_alpha(cleaned, 20)
         cleaned = keep_nearby_components(cleaned, max_component_gap, 20)
         frame = Image.new("RGBA", (cell_width, cell_height), (0, 0, 0, 0))
@@ -96,6 +104,48 @@ def split_source_sheet(
         frame.save(path)
         paths.append(path)
     return paths
+
+
+def infer_source_sheet_anchors(
+    frame_paths: Iterable[str | Path],
+    *,
+    min_alpha: int = 20,
+) -> tuple[list[tuple[int, int]], tuple[int, int, int, int]]:
+    """Infer one stable motion anchor per already-split sheet cell.
+
+    This is deliberately model-neutral: a generator only needs to keep every
+    pose inside an equal-sized cell and place the feet on a visually consistent
+    ground line. The bottom-center of each cleaned foreground bbox becomes the
+    source anchor; the full cell is used as the shared motion envelope.
+    """
+
+    paths = [Path(path) for path in frame_paths]
+    if not paths:
+        raise ValueError("cannot infer anchors from an empty source sheet")
+    anchors: list[tuple[int, int]] = []
+    boxes: list[tuple[int, int, int, int]] = []
+    size: tuple[int, int] | None = None
+    for path in paths:
+        with Image.open(path) as opened:
+            image = opened.convert("RGBA")
+        if size is None:
+            size = image.size
+        elif image.size != size:
+            raise ValueError("source sheet cells must use one common canvas")
+        box = alpha_bbox(image, min_alpha)
+        if box is None:
+            raise ValueError(f"source sheet frame has no foreground pixels: {path}")
+        left, _top, right, bottom = box
+        boxes.append(box)
+        anchors.append(((left + right - 1) // 2, bottom - 1))
+    assert size is not None
+    envelope = (
+        min(box[0] for box in boxes),
+        min(box[1] for box in boxes),
+        max(box[2] for box in boxes),
+        max(box[3] for box in boxes),
+    )
+    return anchors, envelope
 
 
 def select_requested_animation_paths(
@@ -148,6 +198,60 @@ def alpha_bbox(image: Image.Image, min_alpha: int) -> tuple[int, int, int, int] 
     if not len(xs):
         return None
     return int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
+
+
+def remove_chroma_background(image: Image.Image, tolerance: int = 42) -> Image.Image:
+    """Remove a saturated uniform key color, including enclosed regions."""
+
+    rgba = np.asarray(image.convert("RGBA")).copy()
+    if (rgba[:, :, 3] < 250).any():
+        return Image.fromarray(rgba)
+    rgb = rgba[:, :, :3].astype(np.int16)
+    channel_spread = rgb.max(axis=2) - rgb.min(axis=2)
+    saturated = (channel_spread >= 80) & (rgb.max(axis=2) >= 100)
+    corner = np.array(
+        [rgba[0, 0, :3], rgba[0, -1, :3], rgba[-1, 0, :3], rgba[-1, -1, :3]],
+        dtype=np.int16,
+    )
+    background = np.median(corner, axis=0)
+    if int(background.max() - background.min()) >= 80:
+        distance = np.abs(rgb - background).sum(axis=2)
+        rgba[distance <= tolerance, 3] = 0
+    rgba[saturated, 3] = 0
+    return Image.fromarray(rgba)
+
+
+def remove_sheet_separator_lines(
+    image: Image.Image,
+    *,
+    min_coverage: float = 0.8,
+    max_thickness: int = 4,
+) -> Image.Image:
+    """Remove generator-added horizontal rules spanning most of a sheet cell."""
+
+    rgba = np.asarray(image.convert("RGBA")).copy()
+    opaque = rgba[:, :, 3] > 20
+    width = opaque.shape[1]
+    covered = np.sum(opaque, axis=1) >= int(width * min_coverage)
+    runs = np.zeros(opaque.shape[0], dtype=np.int32)
+    for row_index, row in enumerate(opaque):
+        padded = np.concatenate(([False], row, [False]))
+        edges = np.flatnonzero(padded[1:] != padded[:-1])
+        if len(edges):
+            runs[row_index] = int(np.max(edges[1::2] - edges[::2]))
+    rows = covered | (runs >= int(width * 0.4))
+    index = 0
+    while index < len(rows):
+        if not rows[index]:
+            index += 1
+            continue
+        end = index
+        while end + 1 < len(rows) and rows[end + 1]:
+            end += 1
+        if end - index + 1 <= max_thickness:
+            rgba[index : end + 1, :, 3] = 0
+        index = end + 1
+    return Image.fromarray(rgba)
 
 
 def remove_corner_background(image: Image.Image, tolerance: int) -> Image.Image:
@@ -767,6 +871,7 @@ def ingest_frames(
     source_anchor: tuple[int, int] | list[int] | None = None,
     source_anchors: list[tuple[int, int] | list[int]] | None = None,
     source_bounds: tuple[int, int, int, int] | list[int] | None = None,
+    allow_source_resize: bool = False,
 ) -> dict[str, Any]:
     tier = profile.tier(tier_name)
     policy = tier.get("canvasPolicy", "fixed")
@@ -776,6 +881,10 @@ def ingest_frames(
             "placement_mode must be 'per-frame-anchor' or 'shared-motion'"
         )
     preserve_motion = placement_mode == "shared-motion"
+    # Generated sheets may use arbitrary source-cell dimensions. Preserved
+    # RigSpec output is the exception: its source canvas and coordinates are
+    # authoritative even when the caller requests shared-motion validation.
+    preserve_canvas = preserve_placement and not allow_source_resize
     if preserve_placement and policy != "fixed":
         raise ValueError(
             f"tier {tier_name!r}: preservePlacement requires canvasPolicy='fixed'"
@@ -824,7 +933,7 @@ def ingest_frames(
         box = alpha_bbox(image, min_alpha)
         if box is None:
             raise ValueError(f"frame has no foreground pixels after background removal: {path}")
-        if preserve_placement:
+        if preserve_canvas:
             expected_canvas = tuple(map(int, tier["canvas"]))
             if image.size != expected_canvas:
                 raise ValueError(
@@ -845,7 +954,7 @@ def ingest_frames(
             )
 
     content_max = tier.get("contentMax")
-    if content_max and not preserve_placement and not preserve_motion:
+    if content_max and not preserve_canvas and not preserve_motion:
         prepared = [
             _resize_to_fit(
                 image,
@@ -934,7 +1043,7 @@ def ingest_frames(
     else:
         fitted = (
             prepared
-            if preserve_placement
+            if preserve_canvas
             else [
                 _resize_to_fit(image, max_size, filtering, allow_upscale, downscale_filtering)
                 for image in prepared
@@ -961,7 +1070,7 @@ def ingest_frames(
             min_alpha,
         )
         image = apply_palette(image, palette)
-        if preserve_placement:
+        if preserve_canvas:
             canvas = image
         else:
             canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))

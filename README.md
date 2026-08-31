@@ -2,6 +2,9 @@
 
 AssetForge is a local 2D sprite-animation factory. It turns separated character art into real PNG frame sequences and GIF previews, then normalizes, validates, and exports them for web games or Godot.
 
+Model backend notes and optional dependency groups are documented in
+[`docs/model-backends.md`](docs/model-backends.md).
+
 The deterministic cutout renderer is a motion-guide and fallback renderer, not a full replacement for a generative sprite model. A PixelLab-class local replacement must redraw every complete frame from an identity reference plus a pose guide. AssetForge therefore keeps final-frame generation and deterministic delivery as separate stages.
 
 The recurring animation path runs locally and does not consume generation credits:
@@ -251,13 +254,38 @@ source .venv/bin/activate
 python -m pip install -e .
 ```
 
-AssetForge is not published to PyPI yet. Verify a source installation with:
+For a source checkout, verify the installation with:
 
 ```bash
 assetforge --version
 assetforge rig-archetypes
 python -m unittest discover -s assetforge/tests -v
 ```
+
+### One-shot model-independent pipeline
+
+The model is intentionally not a runtime dependency. Export one complete PNG
+animation sheet from Codex Imagegen, ComfyUI, Diffusers, Aseprite, or any other
+tool, then let AssetForge own the deterministic delivery stages:
+
+```bash
+assetforge pipeline \
+  --profile web-pixel-demo \
+  --input build/generated/walk-sheet.png \
+  --input-kind sheet \
+  --columns 8 --rows 1 --frame-count 8 \
+  --character companion --tier village --animation walk --direction east \
+  --backend codex_imagegen \
+  --work build/pipeline/walk \
+  --output build/export/companion-walk.json
+```
+
+The command splits the sheet, infers a per-cell bottom-center anchor, applies
+the profile canvas and palette contract, validates every frame, and exports
+only when validation passes. Use `--input-kind frames` for a directory of PNG
+frames. `--backend` is metadata only; it never selects or downloads a model.
+Pass `--generation-manifest provider.json` to preserve the provider's seed,
+prompt, checkpoint, and reference metadata in `pipeline-manifest.json`.
 
 ## Generate a production animation
 
@@ -412,6 +440,30 @@ assetforge source-sheet \
   --source-anchors '234,735;219,735;228,735;209,735' \
   --source-bounds 0,0,456,736
 ```
+
+For a model-agnostic one-shot sheet pipeline, keep the generator contract to one
+equal-cell sheet and let AssetForge infer the per-cell motion anchors:
+
+```bash
+assetforge source-sheet \
+  --profile art/characters/moa/moa-v23-profile.json \
+  --sheet build/moa-walk-sheet.png \
+  --output build/moa-walk-sheet \
+  --tier battle-candidate \
+  --animation walk \
+  --direction east \
+  --columns 4 \
+  --rows 3 \
+  --auto-anchor
+```
+
+`--auto-anchor` derives each cell's bottom-center foreground anchor and a common
+foreground envelope, so the command does not depend on the image model, provider,
+or its internal frame naming. The generator should still output one pose per cell,
+keep the camera/scale/identity fixed, and place feet near one ground line. The
+result remains a candidate until the profile's full frame-count and identity gates
+pass. For grids with trailing empty cells, pass `--frame-count` (for example,
+`--frame-count 14` for a 14-pose attack in a 4×4 grid).
 
 The command pads uneven sheet cells to one canvas, removes flat-corner backgrounds,
 removes border-connected white/gray matte halos, hardens anti-aliased alpha edges,

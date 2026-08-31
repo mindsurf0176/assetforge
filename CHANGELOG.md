@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.0 - 2026-08-31
+
+- Add the provider-independent `pipeline` command for one-shot sheet/frame
+  normalization, anchor inference, validation, and engine export.
+- Record source hashes and optional generator metadata in a portable pipeline
+  manifest without making any image-generation model a runtime dependency.
+- Add package and release verification coverage for the public installation path.
+
 ## 0.5.0 - 2026-08-27
 
 - Add a portable `release` package that validates every clip, copies frames into an isolated release tree, freezes the source profile, and records SHA-256 hashes.

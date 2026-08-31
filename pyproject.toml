@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "assetforge-2d"
-version = "0.5.0"
+version = "0.6.0"
 description = "Local cutout sprite animation plus deterministic validation and game-engine export."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -15,6 +15,7 @@ dependencies = [
   "numpy>=1.24",
   "Pillow>=10",
 ]
+
 keywords = ["game-development", "pixel-art", "godot", "asset-pipeline", "comfyui"]
 classifiers = [
   "Development Status :: 3 - Alpha",
@@ -26,6 +27,36 @@ classifiers = [
   "Programming Language :: Python :: 3.13",
   "Topic :: Games/Entertainment",
   "Topic :: Multimedia :: Graphics",
+]
+
+[project.optional-dependencies]
+vision = [
+  "opencv-python-headless>=4.10",
+]
+background = [
+  "rembg[cpu]>=2.0.60",
+]
+generation = [
+  "accelerate>=0.34",
+  "diffusers>=0.35",
+  "safetensors>=0.4",
+  "transformers>=4.45",
+]
+all = [
+  "opencv-python-headless>=4.10",
+  "rembg[cpu]>=2.0.60",
+  "accelerate>=0.34",
+  "diffusers>=0.35",
+  "safetensors>=0.4",
+  "transformers>=4.45",
+]
+free = [
+  "opencv-python-headless>=4.10",
+  "rembg[cpu]>=2.0.60",
+  "accelerate>=0.34",
+  "diffusers>=0.35",
+  "safetensors>=0.4",
+  "transformers>=4.45",
 ]
 
 [project.urls]
