@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.6.0 - 2026-08-31
+
+- Add the provider-independent `pipeline` command for one-shot sheet/frame
+  normalization, anchor inference, validation, and engine export.
+- Record source hashes and optional generator metadata in a portable pipeline
+  manifest without making any image-generation model a runtime dependency.
+- Add package and release verification coverage for the public installation path.
+
+## 0.5.0 - 2026-08-27
+
+- Add a portable `release` package that validates every clip, copies frames into an isolated release tree, freezes the source profile, and records SHA-256 hashes.
+- Add `release-verify` to revalidate a release on another machine or game repository without trusting the recorded manifest.
+- Add profile-controlled neutral foreground matte cleanup for bright fringe pixels that survive background removal, with per-frame validation reports and regression coverage.
+- Add bounded bottom-line recoloring for detached neutral shoe highlights that can otherwise read as white strips on light backgrounds.
+- Apply the edge cleanup after final palette compositing so quantization cannot reintroduce a bright outline.
+
+## 0.4.0 - 2026-07-23
+
+- Preserve a hand-authored RigSpec canvas verbatim when the selected profile tier uses `preservePlacement=true`.
+- Reject RigSpec/profile canvas mismatches and report any nontransparent per-frame overflow instead of silently cropping identity-locked sprites.
+- Add `redraw-dataset` and a strict dataset schema for building identity-plus-pose input boards paired with complete animation target boards for a local full-frame redraw model.
+- Keep whole-character validation holdouts so repeated frames from one identity cannot be reported as cross-character generalization.
+- Add a fail-closed Apple-Silicon MFLUX/FLUX.2 edit backend with dry-run plans, explicit execution, inference low-RAM controls, multiple LoRAs, complete-shard checks, and output verification.
+- Publish generated PNG and metadata sidecar pairs with backup-and-rollback so a partial sidecar failure preserves the previous approved result.
+- Export redraw pairs in MFLUX flat edit-LoRA layout while keeping validation characters outside the training directory.
+- Add quantitative held-out redraw gates for identity, completed cells, pose-guide removal, unused cells, and background drift.
+- Add strict MFLUX edit-LoRA dataset validation, train-only subset preparation, base-model shard checks, config planning, and dry-run command compilation.
+- Build redraw datasets and promoted frame exports in sibling staging trees, then atomically swap or roll back without destroying the last successful output.
+- Add complete validation-holdout batch QC and split only passing boards into hashed, portable, native transparent frame sequences.
+- Detect the exact adjacent MFLUX 0.18.0 runtime and gate training on 24 GiB physical memory, 20 GiB free disk, and writable data, cache, and checkpoint paths.
+- Add explicit gated edit-LoRA execution that validates an exact reusable config, verifies MFLUX before any subprocess, re-audits before training, and refuses implicit downloads or checkpoint reuse.
+- Disable MFLUX's recursive training `low_ram` cache path in managed execution so cache cleanup cannot cross a validated boundary.
+- Safely extract the manifest-selected FLUX.2 Klein 4B LoRA from MFLUX checkpoint directories or ZIPs while rejecting archive traversal, symlinks, corrupt tensors, and mismatched metadata.
+- Export portable-v2 train-only bundles with out-of-band manifest verification, exact training-file hashes, held-out identity metadata, and either a verified local-model inventory or external model lock.
+- Support fail-closed Linux/NVIDIA training with an isolated-GPU inventory check, CUDA 13 MLX version verification, a real float GPU kernel, and verified unquantized base weights.
+- Derive whole-epoch schedules from a 1,500-update target by default, with 250-update checkpoints and matching previews for diagnostic checkpoint selection.
+
 ## 0.3.0
 
 - Added a fully local deterministic cutout renderer that generates real PNG frames and GIF previews.

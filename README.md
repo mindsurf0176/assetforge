@@ -2,6 +2,11 @@
 
 AssetForge is a local 2D sprite-animation factory. It turns separated character art into real PNG frame sequences and GIF previews, then normalizes, validates, and exports them for web games or Godot.
 
+Model backend notes and optional dependency groups are documented in
+[`docs/model-backends.md`](docs/model-backends.md).
+
+The deterministic cutout renderer is a motion-guide and fallback renderer, not a full replacement for a generative sprite model. A PixelLab-class local replacement must redraw every complete frame from an identity reference plus a pose guide. AssetForge therefore keeps final-frame generation and deterministic delivery as separate stages.
+
 The recurring animation path runs locally and does not consume generation credits:
 
 ```text
@@ -22,6 +27,211 @@ It is designed to replace the repeatable sprite-animation and delivery portion o
 - Web registry JSON and Godot `SpriteFrames` exports with referenced PNG files.
 - Strict `RigSpec` and `AnimationSpec` validation, including safe relative part paths and acyclic skeleton checks.
 - Existing AI-generated or hand-drawn frame directories can still use the original `ingest -> validate -> export` pipeline.
+- Paired training-board generation for a local full-frame redraw model: cell 0 contains the identity reference, later cells contain style-free pose guides in the input and complete sprite frames in the target.
+- Fail-closed FLUX.2 edit planning and execution through MFLUX on Apple Silicon, with local-weight, LoRA, disk, input-board, and output checks.
+- Character-held-out batch QC and atomic promotion of passing boards into native transparent sprite frames.
+- Gated MFLUX edit-LoRA training, checkpoint extraction, and local inference without a PixelLab or hosted generation call.
+
+## Build a local full-frame redraw dataset
+
+Use approved, direction-matched animation frames to build paired edit-model training boards. This command does not call PixelLab or any hosted generation API:
+
+```bash
+assetforge redraw-dataset \
+  --spec data/redraw-dataset.json \
+  --output build/redraw-dataset
+```
+
+Each input board contains one identity reference followed by silhouette-and-edge pose guides. The matching target board contains the same identity cell followed by complete RGBA animation frames. Character-level validation holdouts prevent duplicate frames from being mistaken for generalization. The cutout rig may create inference-time pose guides, but its rendered pixels are never accepted as the generated production frame.
+
+The build also writes MFLUX's flat edit-training layout under `mflux/train`. Validation inputs and targets stay under `mflux/holdout`, outside the training directory, so a held-out character cannot leak into training. A rebuild completes in a sibling staging directory and swaps atomically; source, I/O, or disk failures preserve the last successful dataset.
+
+## Run the local full-frame redraw backend
+
+MFLUX is an optional isolated runtime; it is not installed as a core AssetForge dependency. On Apple Silicon, install the tested runtime and a pre-quantized FLUX.2 Klein 4B model:
+
+```bash
+uv venv --python 3.11 ~/.local/share/assetforge/mflux-venv
+uv pip install \
+  --python ~/.local/share/assetforge/mflux-venv/bin/python \
+  'mflux==0.18.0'
+mkdir -p ~/Library/Caches/mflux ~/.local/share/assetforge/models
+
+HF_XET_HIGH_PERFORMANCE=1 \
+  ~/.local/share/assetforge/mflux-venv/bin/hf download \
+  Runpod/FLUX.2-klein-4B-mflux-4bit \
+  --local-dir ~/.local/share/assetforge/models/FLUX.2-klein-4B-mflux-4bit
+```
+
+Keep `flux2-klein-4b` in the local directory name. MFLUX 0.18.0 accepts `--base-model` for FLUX.2 edit but does not pass it through internally; AssetForge detects this upstream behavior and blocks an unrecognizable third-party model path.
+
+Check every prerequisite without loading the model:
+
+```bash
+assetforge mflux-doctor \
+  --model-path ~/.local/share/assetforge/models/FLUX.2-klein-4B-mflux-4bit \
+  --cache-dir ~/Library/Caches/mflux
+```
+
+Build and inspect a deterministic dry-run plan first. Add `--execute` only after the plan reports `ready: true`:
+
+```bash
+assetforge mflux-redraw \
+  --input build/redraw-dataset/samples/validation/creature__east__walk/input.png \
+  --output build/redraw/creature-east-walk.png \
+  --model-path ~/.local/share/assetforge/models/FLUX.2-klein-4B-mflux-4bit \
+  --cache-dir ~/Library/Caches/mflux \
+  --low-ram \
+  --mlx-cache-limit-gib 2.5
+
+assetforge mflux-redraw ... --execute
+```
+
+Pass one or more local adapters with matching scales when a project edit-LoRA is approved:
+
+```bash
+assetforge mflux-redraw ... \
+  --lora models/assetforge-redraw.safetensors --lora-scale 1.0 \
+  --execute
+```
+
+An unadapted base-model result is a connectivity baseline, not a production asset. Promote a generated sheet only after a character-held-out visual comparison confirms identity, outline, palette, pose readability, cell order, and loop continuity. This path does not call PixelLab or require a PixelLab token.
+
+Grade a generated board against its held-out target before any sprite export:
+
+```bash
+assetforge redraw-quality \
+  --manifest build/redraw-dataset/dataset.json \
+  --sample creature__east__walk \
+  --generated build/redraw/creature-east-walk.png
+```
+
+The command fails closed when identity, completed cells, pose-guide removal, unused cells, canvas, or background drift miss the fixed thresholds.
+
+For model promotion, name every generated validation board `<sample-id>.png` and require the complete holdout to pass:
+
+```bash
+assetforge redraw-quality-batch \
+  --manifest build/redraw-dataset/dataset.json \
+  --generated-dir build/redraw/holdout
+```
+
+Only a passing validation board can be split into native transparent frames. The export is staged and atomically swapped, and `frames.json` uses portable relative paths and verified hashes:
+
+```bash
+assetforge redraw-board-export \
+  --manifest build/redraw-dataset/dataset.json \
+  --sample creature__east__walk \
+  --generated build/redraw/holdout/creature__east__walk.png \
+  --output build/frames/creature/east/walk
+```
+
+The resulting frame directory can enter the existing `ingest -> validate -> export` engine pipeline.
+
+## Prepare FLUX.2 edit-LoRA training
+
+The training path is separate from local inference. Validate the exact MFLUX version, base model, physical memory, writable paths, and free disk without importing the weights:
+
+```bash
+assetforge mflux-train-doctor \
+  --model-path ~/.local/share/assetforge/models/FLUX2-klein-base-4B-unquantized \
+  --data-path build/redraw-dataset/mflux/train \
+  --checkpoint-path build/training/run
+```
+
+Build an inspectable config for the complete train split. `--write-config` writes it with exclusive creation and returns the parser-only `mflux-train --dry-run` argument vector:
+
+```bash
+assetforge mflux-train-plan \
+  --manifest build/redraw-dataset/dataset.json \
+  --model-path ~/.local/share/assetforge/models/FLUX2-klein-base-4B-unquantized \
+  --config-output build/training/assetforge-redraw.json \
+  --checkpoint-output build/training/run \
+  --write-config
+```
+
+By default AssetForge derives a whole-epoch schedule that reaches at least 1,500 optimizer updates, rather than applying a fixed epoch count to every dataset size. For 32 train boards this is 47 epochs and 1,504 updates. Checkpoints and matching preview renders default to every 250 updates so the first diagnostic run can compare intermediate adapters without creating hundreds of archives. Use `--target-updates` to change that budget, or the mutually exclusive `--epochs` only when intentionally reproducing an exact epoch schedule.
+
+Training intentionally follows MFLUX 0.18.0's FLUX.2 example with unquantized weights, `quantize: null`, and `low_ram: false`. Pre-quantized 4-bit models are inference-only: the supported MLX CUDA package cannot safely attest the quantized backward path. AssetForge also blocks MFLUX's recursive training `low_ram` disk cache from managed execution.
+
+After inspecting that exact config, repeat the same command with `--execute`. AssetForge re-derives the plan, accepts only an exactly equivalent parsed config, and completes the full host, version, data, model, and output-path audit before invoking even MFLUX's dry-run. It audits again immediately before launching training with offline model flags. A newly created or changed checkpoint path, a config mismatch, a quantized model, MFLUX other than 0.18.0, less than 24 GiB RAM, or less than 20 GiB free disk blocks execution:
+
+```bash
+assetforge mflux-train-plan \
+  --manifest build/redraw-dataset/dataset.json \
+  --model-path ~/.local/share/assetforge/models/FLUX2-klein-base-4B-unquantized \
+  --config-output build/training/assetforge-redraw.json \
+  --checkpoint-output build/training/run \
+  --write-config \
+  --execute
+```
+
+For a parser-only smoke subset, copy deterministic train entries to an isolated directory first, then pass both `--sample-limit` and `--prepared-data-path` to `mflux-train-plan`:
+
+```bash
+assetforge mflux-train-prepare \
+  --manifest build/redraw-dataset/dataset.json \
+  --output build/training/smoke \
+  --sample-limit 2
+```
+
+For a Linux/NVIDIA MFLUX host, export a byte-pinned portable-v2 bundle. It contains only the validated train triplets and its transfer manifest; validation targets are deliberately excluded:
+
+```bash
+assetforge mflux-train-bundle \
+  --manifest build/redraw-dataset/dataset.json \
+  --model-lock docs/model-locks/flux2-klein-base-4b-a3b4f484.json \
+  --output build/training/assetforge-redraw-portable
+```
+
+The included lock targets `black-forest-labs/FLUX.2-klein-base-4B` at revision `a3b4f4849157f664bdbc776fd7453c2783562f4d`. `--model-lock` lets the 15.98 GB base model stay remote while pinning every expected file byte. If that exact unquantized model already exists locally, use the mutually exclusive `--model-path` instead. Copy the small bundle and a pinned AssetForge commit to the remote host. MFLUX 0.18.0 installs MLX's CUDA 13 backend on Linux. AssetForge fails closed unless the container exposes exactly one GPU with driver 580+, compute capability 7.5+, at least 23 GiB total and currently free VRAM, matching `mlx` and `mlx-cuda-13` versions in MFLUX's `>=0.30.3,<0.32.0` range, and a successful real float MLX GPU kernel. CUDA compatibility-package exceptions are intentionally not accepted. Install both tools, download the exact locked unquantized revision, and regenerate all absolute paths on that host:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+uv tool install --python 3.13 'mflux==0.18.0'
+uv tool install --python 3.13 /workspace/assetforge
+assetforge --version
+mflux-train --help >/dev/null
+
+MODEL_LOCK=/workspace/assetforge/docs/model-locks/flux2-klein-base-4b-a3b4f484.json
+MFLUX_EXE="$(readlink -f "$(command -v mflux-train)")"
+MFLUX_PY="$(dirname "$MFLUX_EXE")/python"
+"$MFLUX_PY" - "$MODEL_LOCK" <<'PY'
+import json
+import sys
+from huggingface_hub import snapshot_download
+
+lock = json.load(open(sys.argv[1], encoding="utf-8"))
+snapshot_download(
+    repo_id="black-forest-labs/FLUX.2-klein-base-4B",
+    revision="a3b4f4849157f664bdbc776fd7453c2783562f4d",
+    local_dir="/workspace/FLUX2-klein-base-4B-unquantized",
+    allow_patterns=[entry["path"] for entry in lock["files"]],
+)
+PY
+
+assetforge mflux-train-plan \
+  --bundle /workspace/assetforge-redraw-portable \
+  --expected-bundle-sha256 <hash-printed-by-mflux-train-bundle> \
+  --model-path /workspace/FLUX2-klein-base-4B-unquantized \
+  --config-output /workspace/training/assetforge-redraw.json \
+  --checkpoint-output /workspace/training/run \
+  --write-config
+```
+
+Inspect the reported bundle hash, model fingerprint, selected-file fingerprint, `schedule`, MFLUX version, memory, disk, and accelerator checks before repeating with `--execute`. The generated config contains host-specific absolute paths, so never reuse the Mac config on Linux or pass it to an unrelated CUDA/Diffusers trainer. Treat fewer than 50 paired boards as a diagnostic run rather than a quality run.
+
+For the complete paid-host sequence—preflight before upload, pinned installs, `tmux` logging, checkpoint extraction, verified result download, local held-out QC, and Pod termination—follow [the RunPod A40 runbook](docs/runpod-a40-training.md). See [MFLUX 0.18.0's NVIDIA install](https://github.com/filipstrand/mflux/blob/v.0.18.0/README.md) and [MLX's CUDA requirements](https://ml-explore.github.io/mlx/build/html/install.html) for the live platform prerequisites.
+
+Extract only the LoRA named by a completed MFLUX checkpoint manifest. ZIP traversal, symlinks, corrupt safetensors, missing LoRA tensor pairs, and mismatched MFLUX/model metadata are rejected:
+
+```bash
+assetforge mflux-train-extract \
+  --checkpoint /workspace/training/run/checkpoints/0001504_checkpoint.zip \
+  --output models/assetforge-redraw.safetensors
+```
+
+Pass that adapter to `mflux-redraw`, generate every validation sample, require `redraw-quality-batch` to pass, and only then export production frames.
 
 ## Input quality boundary
 
@@ -44,13 +254,38 @@ source .venv/bin/activate
 python -m pip install -e .
 ```
 
-AssetForge is not published to PyPI yet. Verify a source installation with:
+For a source checkout, verify the installation with:
 
 ```bash
 assetforge --version
 assetforge rig-archetypes
 python -m unittest discover -s assetforge/tests -v
 ```
+
+### One-shot model-independent pipeline
+
+The model is intentionally not a runtime dependency. Export one complete PNG
+animation sheet from Codex Imagegen, ComfyUI, Diffusers, Aseprite, or any other
+tool, then let AssetForge own the deterministic delivery stages:
+
+```bash
+assetforge pipeline \
+  --profile web-pixel-demo \
+  --input build/generated/walk-sheet.png \
+  --input-kind sheet \
+  --columns 8 --rows 1 --frame-count 8 \
+  --character companion --tier village --animation walk --direction east \
+  --backend codex_imagegen \
+  --work build/pipeline/walk \
+  --output build/export/companion-walk.json
+```
+
+The command splits the sheet, infers a per-cell bottom-center anchor, applies
+the profile canvas and palette contract, validates every frame, and exports
+only when validation passes. Use `--input-kind frames` for a directory of PNG
+frames. `--backend` is metadata only; it never selects or downloads a model.
+Pass `--generation-manifest provider.json` to preserve the provider's seed,
+prompt, checkpoint, and reference metadata in `pipeline-manifest.json`.
 
 ## Generate a production animation
 
@@ -159,6 +394,84 @@ assetforge animate \
 
 The manifest reports `quality: "coarse"`, `occlusionSynthesis: false`, alpha reconstruction IoU, unscored semantic confidence, omitted regions, and warnings. Reconstruction IoU only proves that visible alpha was preserved; it does not prove that the automatic semantic split was correct. Inspect `rig/rig-overlay.png` and the generated contact sheet. Coarse output can be exported into an isolated review artifact, but `--deploy-dir` is blocked until separated production art is approved.
 
+## Build animation and redraw boards from one image
+
+The one-image workflow packages the deterministic cutout result together with
+identity-plus-pose boards for a full-frame redraw backend:
+
+```bash
+assetforge single-image \
+  --reference art/creature-east.png \
+  --archetype winged-quadruped-side \
+  --character creature \
+  --clips idle,walk \
+  --frames idle=4,walk=8 \
+  --height 192 \
+  --output build/creature-one-image
+```
+
+This writes `cutout/` frames and one `redraw-boards/<clip>.png` per clip. Cell
+0 is the identity image and later cells are pose guides. With `--execute`, each
+board is redrawn as complete full-body frames, then AssetForge applies one
+shared palette, one common canvas, and a bottom anchor across every clip before
+writing `redrawn/normalized/`. The cutout frames remain `coarse`; only the
+redrawn normalized output is a `production-candidate` pending visual QA. Without
+a ready local model, the command fails closed and preserves the boards. Redraw
+prompts require genuine transparent RGBA sprite backgrounds; the delivery path
+also removes border-connected white/gray matte pixels and hardens the remaining
+silhouette alpha so light fringes do not reach the game runtime.
+
+## Ingest a generated source sheet with a fixed motion anchor
+
+When a generator returns one isolated horizontal sheet, ingest it as a shared-motion
+clip instead of independently centering each frame:
+
+```bash
+assetforge source-sheet \
+  --profile godot-pixel-demo \
+  --sheet art/vesper-attack-sheet.png \
+  --output build/vesper-attack \
+  --tier battle-generated \
+  --animation attack \
+  --direction east \
+  --columns 4 \
+  --crop-height 736 \
+  --source-anchor 228,735 \
+  --source-anchors '234,735;219,735;228,735;209,735' \
+  --source-bounds 0,0,456,736
+```
+
+For a model-agnostic one-shot sheet pipeline, keep the generator contract to one
+equal-cell sheet and let AssetForge infer the per-cell motion anchors:
+
+```bash
+assetforge source-sheet \
+  --profile art/characters/moa/moa-v23-profile.json \
+  --sheet build/moa-walk-sheet.png \
+  --output build/moa-walk-sheet \
+  --tier battle-candidate \
+  --animation walk \
+  --direction east \
+  --columns 4 \
+  --rows 3 \
+  --auto-anchor
+```
+
+`--auto-anchor` derives each cell's bottom-center foreground anchor and a common
+foreground envelope, so the command does not depend on the image model, provider,
+or its internal frame naming. The generator should still output one pose per cell,
+keep the camera/scale/identity fixed, and place feet near one ground line. The
+result remains a candidate until the profile's full frame-count and identity gates
+pass. For grids with trailing empty cells, pass `--frame-count` (for example,
+`--frame-count 14` for a 14-pose attack in a 4×4 grid).
+
+The command pads uneven sheet cells to one canvas, removes flat-corner backgrounds,
+removes border-connected white/gray matte halos, hardens anti-aliased alpha edges,
+removes tiny/edge-connected sheet bleed, and keeps the supplied per-frame anchors.
+Validate the result with
+`--placement-mode shared-motion`; promote it to `battle-approved` only after visual
+review and runtime QA.
+
 ## Normalize, validate, and export in one run
 
 Add a packaged or custom profile to the same `animate` command:
@@ -243,6 +556,12 @@ assetforge animate --spec hero-east.animation.json
 
 `--spec` owns all animation settings. Only `--work` may override its default build directory, so conflicting flags fail instead of being silently ignored.
 
+For native pixel rigs whose authored coordinates must not move, give the selected
+profile tier `preservePlacement: true` and make its fixed canvas exactly match
+`RigSpec.canvas`. AssetForge then renders the rig canvas verbatim. Any opaque
+pixel that would cross an edge fails with the clip, frame, and overflow extent;
+it is never silently cropped or rescaled.
+
 ## Output layout
 
 Production part and part-sheet inputs use this layout. Coarse reference input writes `autorig-report.json` in place of `rig-report.json`.
@@ -294,6 +613,41 @@ Animation-specific names such as `walk_00.png` are preferred. Provider-neutral n
 
 Local ComfyUI remains available through `comfy-compile`, `comfy-submit`, `comfy-run`, and `comfy-build`. Network submission is dry-run by default and requires `--execute`.
 
+## Release a game-ready character direction
+
+After a complete set has passed visual review, package it as a portable release
+instead of copying loose PNGs by hand. The input may contain either
+`<clip>/frames/*.png` directories or one flat directory named with clip
+prefixes such as `walk_00.png`.
+
+```bash
+assetforge release \
+  --profile art/characters/moa/moa-ungoo-benchmark-profile.json \
+  --input build/moa-ungoo-benchmark-clips-v12 \
+  --output build/releases/moa-east \
+  --character gemini \
+  --direction east \
+  --tier battle-candidate
+```
+
+The command fails closed when a clip is missing, a frame is not genuinely RGBA
+transparent, the canvas/palette/anchor contract fails, or a bright neutral
+foreground matte remains above the profile threshold. The output contains
+`profile.json`, `frames/<clip>/*.png`, and `release.json` with relative paths,
+FPS/loop metadata, validation summaries, and SHA-256 hashes. It is transactionally
+published and never replaces an existing release unless `--overwrite` is explicit.
+
+Verify the copied bundle after moving it into a game repository or another
+machine:
+
+```bash
+assetforge release-verify --manifest build/releases/moa-east/release.json
+```
+
+The release package is an asset delivery boundary, not a gameplay rule source:
+the engine still owns hitboxes, anchors in world space, state transitions, and
+combat timing.
+
 ## Profiles and contracts
 
 The packaged profiles are:
@@ -308,6 +662,7 @@ Packaged JSON Schemas:
 - `assetforge/profiles/assetforge-profile.schema.json`
 - `assetforge/schemas/rig-spec.schema.json`
 - `assetforge/schemas/animation-spec.schema.json`
+- `assetforge/schemas/release-manifest.schema.json`
 
 Profiles own canvas, minimum readable content size, palette, composed-frame alpha, source-part alpha, anchor, animation, validation, and export rules. `quality.partAlpha` is separate from final-frame transparency so a project can tune intentional holes in rings, wings, or tails without disabling composed-frame reporting. `tier.contentMin` prevents an oversized motion envelope from silently shrinking frames into unreadable pixels. Gameplay state, hit timing, damage, and combat outcomes remain deterministic game code.
 

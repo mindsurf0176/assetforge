@@ -1,0 +1,117 @@
+{
+  "schemaVersion": 1,
+  "id": "moa",
+  "displayName": "모아",
+  "epithet": "잔상의 무희",
+  "sourceCharacter": "gemini",
+  "faction": "청람 유격대",
+  "role": "striker",
+  "element": "air",
+  "ability": {
+    "name": "겹빛 연격",
+    "runtimeEffect": "every_n_attack",
+    "trigger": 3,
+    "bonusDamage": 0.6
+  },
+  "designThesis": "한 명의 전투원이 두 개의 잔상과 박자를 겹쳐 전선을 찢고 지나간다.",
+  "identity": {
+    "personality": "전술 드론과 혼잣말처럼 대화하며 리듬이 깨지는 것을 싫어한다.",
+    "flavor": "한 번의 빈틈에 두 개의 궤적을 겹쳐 넣는다.",
+    "motif": "쌍의 리듬, 바람의 잔상, 정확한 세 번째 박자"
+  },
+  "assetSpec": {
+    "camera": "flat orthographic side view facing east",
+    "canvas": [244, 247],
+    "anchor": [123, 243],
+    "renderSize": [244, 247],
+    "visibleHeightTarget": [205, 228],
+    "footBaseline": 243,
+    "background": "transparent RGBA",
+    "zLayer": "actor",
+    "filtering": "nearest",
+    "footprint": [[0, 0]],
+    "collision": [[0, 0]],
+    "debugOverlay": "show anchor, visible bounds, footprint, and effect envelope"
+  },
+  "silhouette": {
+    "primaryRead": "asymmetric short hair, low forward lean, two separated blade arcs",
+    "mustReadAtRuntime": [
+      "one body with two autonomous-looking afterimage drones",
+      "split dual blades, never a single sword silhouette",
+      "short asymmetric jacket and one raised shoulder guard",
+      "coat tails and blade trails flowing backward to communicate air"
+    ],
+    "mustAvoid": [
+      "generic twin swordsman",
+      "symmetrical armor set",
+      "large cape hiding the legs",
+      "floating effects disconnected from the hands",
+      "extra human limbs"
+    ]
+  },
+  "palette": {
+    "body": [25, 38, 55],
+    "outline": [10, 17, 28],
+    "airAccent": [77, 211, 196],
+    "secondaryAccent": [163, 125, 255],
+    "cloth": [51, 76, 103],
+    "skin": [225, 174, 146],
+    "hair": [190, 220, 221],
+    "effect": [213, 255, 247],
+    "maxColors": 128,
+    "lockAcrossClip": true
+  },
+  "weapon": {
+    "name": "분절 쌍도",
+    "count": 2,
+    "rigid": true,
+    "read": "two short segmented blades with separate cyan and violet edge glints"
+  },
+  "animations": {
+    "idle": { "frames": 6, "fps": 8, "loop": true, "purpose": "breathing, hand correction, and subtle drone orbit" },
+    "walk": { "frames": 12, "fps": 12, "loop": true, "purpose": "low forward run with contact, passing, and recovery micro-poses" },
+    "aim": { "frames": 4, "fps": 6, "loop": true, "purpose": "blade-ready hold with small air current" },
+    "attack": { "frames": 14, "fps": 14, "loop": false, "beats": ["anticipation", "draw", "first slash", "crossing slash", "third-beat overlap", "impact", "recoil", "settle"] },
+    "hit": { "frames": 6, "fps": 12, "loop": false, "purpose": "impact compression, recoil, blade correction, and return to guard" },
+    "death": { "frames": 10, "fps": 10, "loop": false, "purpose": "afterimages collapse first, knees fail, body falls, then grounded stillness" }
+  },
+  "generation": {
+    "sourceMode": "identity-plus-independent-frame-poses",
+    "identityReference": "ungoo-benchmark/moa-ungoo-benchmark-master-v1.png; 256x253, 63-color transparent production-style master; v21 reuses only the high-density authored frame sources and retains Moa identity while using Ungoo rifleman as pixel-production benchmark only",
+    "productionStyleBenchmark": "Starline Ungoo rifleman: compact 256x253 silhouette, restricted palette, hard pixel clusters, stable side-view frame-to-frame motion; no character, weapon, pose, or pixel reuse",
+    "pixelPolish": "native nearest-pixel raster pass with one shared 128-color palette across all clips; preserve high-density source frames, pre-align action feet, keep motion-stable walk sources, recolor detached neutral bottom lines, and review both 1x and 4x",
+    "frameMode": "one complete transparent frame per authored pose, then shared-motion normalize",
+    "promptConstraints": [
+      "genuine transparent RGBA background",
+      "no white matte, gray/black backdrop, checkerboard, or glow fringe",
+      "same face, hair, costume, weapon geometry, camera, scale, and palette",
+      "hard native pixel clusters, no anti-aliasing, no painterly gradients",
+      "compact silhouette with deliberate empty transparent margins; animate by small controlled deltas around this master",
+      "keep head and torso identity fixed while allowing coat, blades, and afterimages to move"
+    ],
+    "negativePrompt": "front view, perspective, single sword, shield, rifle, cape, scenery, labels, text, watermark, extra limbs, duplicated body, white background, gray background, checkerboard, glow halo, anti-aliasing, blur"
+  },
+  "qaGates": {
+    "requiredStates": ["idle", "walk", "aim", "attack", "hit", "death"],
+    "canvasExact": [244, 247],
+    "footBaselineMaxDrift": 1,
+    "identityHeightDriftMaxRatio": 0.15,
+    "identityWidthDriftMaxRatio": 0.5,
+    "transparentBackground": true,
+    "whiteHaloPixels": 0,
+    "manualChecks": [
+      "read silhouette at 1x and 4x nearest preview",
+      "confirm the third attack beat is visibly stronger",
+      "confirm afterimages never read as extra playable bodies",
+      "confirm blade trails are attached to blade motion",
+      "run Godot battlefield screenshot with anchor/debug overlay"
+    ]
+  },
+  "delivery": {
+    "characterKey": "gemini",
+    "runtimeSpritePath": "res://assets/sprites/moa_codex",
+    "portraitPath": "res://assets/art/characters/moa/moa-face-v1.png",
+    "cardPath": "res://assets/art/characters/moa/moa-card-v1.png",
+    "status": "animation-candidate"
+  }
+}

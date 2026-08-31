@@ -577,12 +577,14 @@ def render_animation_set(
     make_gifs: bool = True,
     mirror_x: bool = False,
     timing_source: str = "rig",
+    preserve_rig_canvas: bool = False,
 ) -> dict[str, Any]:
-    """Render all clips with one shared motion bound and deterministic canvas.
+    """Render all clips with one deterministic canvas.
 
     A generous temporary canvas prevents attack/death motion from being clipped.
-    The final crop is computed once across every requested clip, so scale and world
-    placement do not jump when the animation changes.
+    Normally the final crop is computed once across every requested clip, so scale
+    and world placement do not jump when the animation changes. Preserved rigs use
+    their authored canvas verbatim and reject, rather than silently clip, overflow.
     """
 
     if not clip_names:
@@ -605,6 +607,12 @@ def render_animation_set(
     motion_padding = max(source_width, source_height)
     render_size = (source_width + motion_padding * 2, source_height + motion_padding * 2)
     origin = (float(motion_padding), float(motion_padding))
+    rig_canvas_crop = (
+        motion_padding,
+        motion_padding,
+        motion_padding + source_width,
+        motion_padding + source_height,
+    )
     sampling = Image.Resampling.NEAREST if resample == "nearest" else Image.Resampling.BICUBIC
 
     reference_clip = "idle" if "idle" in clip_names else clip_names[0]
@@ -654,6 +662,25 @@ def render_animation_set(
                     raise RigError(
                         f"clip {clip_name!r} frame {frame_index} overflows after ground locking"
                     )
+        if preserve_rig_canvas:
+            overflow = {
+                "left": max(0, rig_canvas_crop[0] - box[0]),
+                "top": max(0, rig_canvas_crop[1] - box[1]),
+                "right": max(0, box[2] - rig_canvas_crop[2]),
+                "bottom": max(0, box[3] - rig_canvas_crop[3]),
+            }
+            exceeded = [
+                f"{side}={pixels}px"
+                for side, pixels in overflow.items()
+                if pixels
+            ]
+            if exceeded:
+                raise RigError(
+                    f"clip {clip_name!r} frame {frame_index} overflows preserved "
+                    f"RigSpec canvas {[source_width, source_height]}: "
+                    f"{', '.join(exceeded)}; increase the RigSpec/profile canvas "
+                    "or reduce the authored motion"
+                )
         return frame
 
     boxes: list[tuple[int, int, int, int]] = []
@@ -668,8 +695,14 @@ def render_animation_set(
             assert box is not None
             boxes.append(box)
     union = _union_box(boxes)
-    crop_padding = max(2, round(max(union[2] - union[0], union[3] - union[1]) * 0.035))
-    crop = _expanded_box(union, render_size, crop_padding)
+    if preserve_rig_canvas:
+        crop = rig_canvas_crop
+    else:
+        crop_padding = max(
+            2,
+            round(max(union[2] - union[0], union[3] - union[1]) * 0.035),
+        )
+        crop = _expanded_box(union, render_size, crop_padding)
     reference_anchor = [
         (reference_box[0] + reference_box[2] - 1) // 2 - crop[0],
         reference_box[3] - 1 - crop[1],
@@ -745,7 +778,7 @@ def render_animation_set(
         "schemaVersion": 1,
         "renderer": "local-cutout-v1",
         "timingSource": timing_source,
-        "fit": "shared-motion-bounds",
+        "fit": "rig-canvas" if preserve_rig_canvas else "shared-motion-bounds",
         "canvas": [crop[2] - crop[0], crop[3] - crop[1]],
         "sourceCanvas": [source_width, source_height],
         "motionBounds": list(crop),
@@ -759,6 +792,9 @@ def render_animation_set(
         "contactSheet": str(contact),
         "clips": manifest_clips,
     }
+    if preserve_rig_canvas:
+        manifest["preserveRigCanvas"] = True
+        manifest["overflowPolicy"] = "error"
     manifest_path = safe_output_child(output, "animation-manifest.json", label="animation manifest")
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     manifest["manifest"] = str(manifest_path)

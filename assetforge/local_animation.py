@@ -369,6 +369,10 @@ def run_local_animation(
     if deploy_dir is not None and resource_prefix is None:
         raise RigError("--deploy-dir requires --resource-prefix so the destination can be verified")
 
+    profile_tier: dict[str, Any] | None = None
+    if profile is not None:
+        assert tier is not None
+        profile_tier = profile.tier(tier)
     frame_counts = _resolved_frame_counts(clips, frame_overrides or {}, profile)
 
     work = Path(work_dir).expanduser().resolve()
@@ -396,6 +400,20 @@ def run_local_animation(
     if profile is not None:
         _validate_production_part_alpha(rig, profile)
         rig = _profile_timed_rig(rig, clips, profile)
+    preserve_rig_canvas = bool(
+        profile_tier and profile_tier.get("preservePlacement", False)
+    )
+    if preserve_rig_canvas:
+        assert profile_tier is not None
+        rig_canvas = list(map(int, rig["canvas"]))
+        profile_canvas = list(map(int, profile_tier["canvas"]))
+        if rig_canvas != profile_canvas:
+            assert profile is not None and tier is not None
+            raise RigError(
+                f"profile {profile.id!r} tier {tier!r} preservePlacement requires "
+                f"RigSpec canvas {rig_canvas} to exactly match profile canvas "
+                f"{profile_canvas}"
+            )
     rig_direction = rig["direction"]
     mirror_x = False
     if rig_direction != direction:
@@ -424,6 +442,7 @@ def run_local_animation(
         resample=resample,
         mirror_x=mirror_x,
         timing_source=f"profile:{profile.id}" if profile is not None else "rig",
+        preserve_rig_canvas=preserve_rig_canvas,
     )
     for stage, label in (
         ("normalized", "normalized animation output"),
@@ -474,8 +493,8 @@ def run_local_animation(
             direction,
             placement_mode="shared-motion",
             palette_override=palette,
-            source_anchor=raw["motionAnchor"],
-            source_bounds=raw["contentBounds"],
+            source_anchor=None if preserve_rig_canvas else raw["motionAnchor"],
+            source_bounds=None if preserve_rig_canvas else raw["contentBounds"],
         )
         report_path = safe_output_child(
             work,

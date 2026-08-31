@@ -60,6 +60,10 @@
       "maxFrames": 8,
       "fps": 12,
       "loop": false,
+      "identity": {
+        "maxHeightDriftRatio": 0.3,
+        "maxWidthDriftRatio": 0.5
+      },
       "prompt": "anticipation, attack, recoil, and recovery"
     },
     "hit": {
